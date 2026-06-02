@@ -158,19 +158,53 @@ final class BrowserPanelChromeBackgroundColorTests: XCTestCase {
         assertResolvedColorMatchesTheme(for: .dark)
     }
 
-    func testTransparentGhosttyBackgroundKeepsAlphaForBlankBrowserChrome() {
+    func testTransparentGhosttyBackgroundUsesClearBlankBrowserChrome() {
         let baseColor = NSColor(srgbRed: 0.13, green: 0.29, blue: 0.47, alpha: 1.0)
         let themeBackground = GhosttyBackgroundTheme.color(backgroundColor: baseColor, opacity: 0.42)
 
         guard let actual = resolvedBrowserChromeBackgroundColor(
             for: .dark,
-            themeBackgroundColor: themeBackground
+            themeBackgroundColor: themeBackground,
+            drawsBackground: false
         ).usingColorSpace(.sRGB) else {
             XCTFail("Expected sRGB-convertible color")
             return
         }
 
-        XCTAssertEqual(actual.alphaComponent, 0.42, accuracy: 0.001)
+        XCTAssertEqual(actual.alphaComponent, 0.0, accuracy: 0.001)
+    }
+
+    func testBrowserChromeDrawDecisionClearsBlankPageForTransparentGhosttyBackground() {
+        XCTAssertFalse(BrowserPanel.drawsWebViewBackground(
+            isBlankPage: true,
+            opacity: 0.42,
+            usesGhosttyGlassStyle: false,
+            usesTransparentWindow: false
+        ))
+    }
+
+    func testBrowserChromeDrawDecisionKeepsFillForRealPagesWithTransparentGhosttyBackground() {
+        XCTAssertTrue(BrowserPanel.drawsWebViewBackground(
+            isBlankPage: false,
+            opacity: 0.42,
+            usesGhosttyGlassStyle: false,
+            usesTransparentWindow: false
+        ))
+    }
+
+    func testBrowserChromeDrawDecisionKeepsFillForOpaqueGhosttyBackground() {
+        XCTAssertTrue(BrowserPanel.drawsWebViewBackground(
+            isBlankPage: true,
+            opacity: 1.0,
+            usesGhosttyGlassStyle: false,
+            usesTransparentWindow: false
+        ))
+    }
+
+    func testBrowserBlankPageURLDetectionTreatsOnlyEmptyAndAboutBlankAsBlank() throws {
+        XCTAssertTrue(BrowserPanel.isBlankBrowserPageURL(nil))
+        XCTAssertTrue(BrowserPanel.isBlankBrowserPageURL(try XCTUnwrap(URL(string: "about:blank"))))
+        XCTAssertFalse(BrowserPanel.isBlankBrowserPageURL(try XCTUnwrap(URL(string: "https://mail.google.com/"))))
     }
 
     private func assertResolvedColorMatchesTheme(
@@ -183,7 +217,8 @@ final class BrowserPanelChromeBackgroundColorTests: XCTestCase {
         guard
             let actual = resolvedBrowserChromeBackgroundColor(
                 for: colorScheme,
-                themeBackgroundColor: themeBackground
+                themeBackgroundColor: themeBackground,
+                drawsBackground: true
             ).usingColorSpace(.sRGB),
             let expected = themeBackground.usingColorSpace(.sRGB)
         else {
