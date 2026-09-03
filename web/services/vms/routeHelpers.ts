@@ -1,24 +1,48 @@
 import type { Span } from "@opentelemetry/api";
 import { recordSpanError, withApiRouteSpan, type MaybeAttributes } from "../telemetry";
-import { unauthorized, verifyRequest, type AuthedUser } from "./auth";
+import {
+  parseNativeStackTokens,
+  unauthorized,
+  verifyRequest,
+  type AuthedUser,
+} from "./auth";
+import {
+  isPaidVmPlan,
+  isVmBillingTeamResolutionError,
+  isVmProGateBlocked,
+  maxActiveVmsForPlan,
+  resolveVmEntitlements,
+  type VmEntitlements,
+} from "./entitlements";
 import {
   isVmBillingError,
+  isVmAccountDeletionInProgressError,
+  isVmAttachTransportUnsupportedError,
+  isVmCreateDisabledError,
+  isVmCreateCreditsInsufficientError,
+  isVmCreateFailedError,
+  isVmCreateInProgressError,
   isVmDatabaseError,
+  isVmFreeAccessExpiredError,
+  isVmLimitExceededError,
+  isVmNotFoundError,
+  isVmOperationUnsupportedError,
   isVmProviderOperationError,
+  isVmSnapshotNotFoundError,
+  vmWorkflowErrorCause,
+  type VmOperationUnsupportedError,
 } from "./errors";
 import { recordSpanTiming } from "./timings";
+import { authProviderErrorResponse } from "./authErrors";
+import { reportVmErrorResponse, VM_ERROR_CODE_HEADER } from "./observability";
+import { vmRequestLocale, vmRequiresProCopy, vmUnsupportedCopy } from "./vmErrorMessages";
+import type { Locale } from "../../i18n/routing";
 
 /** Bearer + refresh token pair the mac app stashes in keychain. */
 export type StackBearer = { accessToken: string; refreshToken: string };
 
 export function parseBearer(request: Request): StackBearer | null {
-  const auth = request.headers.get("authorization");
-  const refresh = request.headers.get("x-stack-refresh-token");
-  if (!auth?.toLowerCase().startsWith("bearer ") || !refresh) return null;
-  const accessToken = auth.slice("bearer ".length).trim();
-  const refreshToken = refresh.trim();
-  if (!accessToken || !refreshToken) return null;
-  return { accessToken, refreshToken };
+  return parseNativeStackTokens(request);
 }
 
 export type AuthedVmRouteContext = {
@@ -60,18 +84,22 @@ export async function withAuthedVmApiRoute(
         const routeStartedAtMs = performance.now();
         const bearer = parseBearer(request);
         const authStart = performance.now();
-        const user = await verifyRequest(request, { requestedTeamId: requestedVmTeamIdFromRequest(request) });
+        let user: AuthedUser | null;
+        try {
+          user = await verifyRequest(request, { requestedTeamId: requestedVmTeamIdFromRequest(request) });
+        } catch (error) {
+          return finalize(authProviderErrorResponse(error, `${route}.auth`));
+        }
         const authDurationMs = performance.now() - authStart;
         recordSpanTiming(span, "auth", authDurationMs);
         if (!user) return unauthorized();
-        if (requiresBrowserMutationProtection(request.method, bearer) && !browserMutationOriginAllowed(request)) {
-          return jsonResponse({ error: "forbidden" }, 403);
-        }
+        const mutationForbidden = enforceBrowserMutationProtection(request, bearer);
+        if (mutationForbidden) return mutationForbidden;
         return finalize(await handler({ user, span, authDurationMs, routeStartedAtMs, setResponseFinalizer }));
       } catch (err) {
         recordSpanError(span, err);
         console.error(failureLog, err);
-        const workflowError = vmWorkflowErrorResponse(err);
+        const workflowError = await vmWorkflowErrorResponse(err, { locale: vmRequestLocale(request) });
         if (workflowError) return finalize(workflowError);
         return finalize(vmErrorResponse({
           error: "vm_internal_error",
@@ -97,6 +125,19 @@ export function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
+export function enforceBrowserMutationProtection(
+  request: Request,
+  bearer: StackBearer | null = parseBearer(request),
+): Response | null {
+  if (
+    requiresBrowserMutationProtection(request.method, bearer) &&
+    !browserMutationOriginAllowed(request)
+  ) {
+    return jsonResponse({ error: "forbidden" }, 403);
+  }
+  return null;
+}
+
 export type VmErrorResponseInput = {
   readonly error: string;
   readonly message: string;
@@ -105,17 +146,100 @@ export type VmErrorResponseInput = {
   readonly reason?: string;
   readonly extra?: Record<string, unknown>;
   readonly details?: Record<string, unknown>;
+  /**
+   * Operator-facing context (provider, image id, env var) for Sentry only.
+   * NEVER serialized into the response: VM error payloads deliberately hide
+   * implementation details from callers (see expectNoCloudVmImplementationLeaks
+   * in tests/vm-route-auth.test.ts).
+   */
+  readonly diagnostics?: Record<string, unknown>;
+  readonly phase?: VmLifecyclePhase;
+  readonly retryable?: boolean;
+  readonly retryAfterSeconds?: number;
+  readonly displayTitle?: string;
+  readonly displayMessage?: string;
+  readonly severity?: "info" | "warning" | "error";
 };
 
+export type VmLifecyclePhase =
+  | "auth"
+  | "billing"
+  | "create"
+  | "restore"
+  | "fork"
+  | "snapshot"
+  | "resume"
+  | "attach"
+  | "ssh"
+  | "exec"
+  | "destroy"
+  | "status"
+  | "list"
+  | "unknown";
+
 export function vmErrorResponse(input: VmErrorResponseInput): Response {
-  return jsonResponse({
+  const retryAfterSeconds = normalizedRetryAfterSeconds(input.retryAfterSeconds);
+  const payload = {
     ...(input.extra ?? {}),
-    ...(input.details ? { details: input.details } : {}),
+    ...(input.details ? { details: {
+      ...input.details,
+      ...(input.phase ? { phase: input.phase } : {}),
+      ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
+      ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+    } } : {}),
+    ...(input.phase ? { phase: input.phase } : {}),
+    ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
+    ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+    ui: {
+      title: input.displayTitle ?? defaultVmDisplayTitle(input),
+      message: input.displayMessage ?? input.message,
+      phase: input.phase ?? "unknown",
+      severity: input.severity ?? (input.status >= 500 ? "warning" : "error"),
+      retryable: input.retryable ?? false,
+      ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+    },
     error: input.error,
     message: input.message,
     reason: input.reason ?? input.message,
     action: input.action,
-  }, input.status);
+  };
+  const headers: Record<string, string> = {};
+  if (retryAfterSeconds !== undefined) {
+    headers["retry-after"] = String(retryAfterSeconds);
+  }
+  // Every VM error flows through here, so this is the one place operator-fault
+  // errors reach Sentry and the one place the machine-readable code is exposed
+  // for response finalizers. Reporting never changes the response.
+  headers[VM_ERROR_CODE_HEADER] = input.error;
+  try {
+    reportVmErrorResponse(input);
+  } catch {
+    // Reporting must never change the caller's control flow.
+  }
+  return new Response(JSON.stringify(payload), {
+    status: input.status,
+    headers: { "content-type": "application/json", ...headers },
+  });
+}
+
+/**
+ * The paywall response for a free-plan machine whose access window lapsed:
+ * the machine and its data are preserved, reconnecting requires Pro. 402 with
+ * `upgradeRequired`/`upgradeUrl` so clients render an upgrade prompt, mirroring
+ * the free-plan variant of `vmActiveLimitExceededResponse`.
+ */
+export function vmFreeAccessExpiredResponse(input: {
+  readonly vmId: string;
+  readonly windowDays: number;
+}): Response {
+  return vmErrorResponse({
+    error: "vm_access_requires_pro",
+    status: 402,
+    message: `The free plan includes ${input.windowDays} days of access to a machine. ${input.vmId} is past that window — the machine and everything on it are preserved, and upgrading to Pro reconnects it.`,
+    action: `Upgrade to Pro at ${VM_UPGRADE_URL} to reconnect ${input.vmId}, or delete it with \`cmux vm rm ${input.vmId}\`.`,
+    extra: { upgradeRequired: true, upgradeUrl: VM_UPGRADE_URL },
+    details: { vmId: input.vmId, windowDays: input.windowDays },
+  });
 }
 
 export function notFoundVm(vmId: string): Response {
@@ -128,54 +252,620 @@ export function notFoundVm(vmId: string): Response {
   });
 }
 
-export function vmWorkflowErrorResponse(err: unknown): Response | null {
-  if (isVmProviderOperationError(err)) {
+/** Translate resource-scoped workflow failures shared by VM endpoint routes. */
+export function vmResourceErrorResponse(err: unknown, vmId: string): Response | null {
+  if (isVmFreeAccessExpiredError(err)) {
+    return vmFreeAccessExpiredResponse({ vmId, windowDays: err.windowDays });
+  }
+  if (isVmNotFoundError(err)) return notFoundVm(vmId);
+  return null;
+}
+
+export type VmRouteAccountScope =
+  | {
+    readonly ok: true;
+    readonly requestedBillingTeamId: string | null;
+    readonly entitlements: VmEntitlements;
+  }
+  | {
+    readonly ok: false;
+    readonly response: Response;
+  };
+
+type VmProvisioningScopeOptions = {
+  readonly requestedBillingTeamId?: string | null;
+};
+
+/**
+ * Resolve the account scope for a route that can allocate a new machine.
+ *
+ * Provisioning routes must use this helper instead of resolving entitlements
+ * and checking the Pro gate independently. Keeping the account lookup and
+ * policy decision together makes a newly added provisioning route fail closed
+ * by construction while management routes can continue to use
+ * `resolveVmRouteAccountScope` without a paywall.
+ */
+export async function resolveVmProvisioningAccountScope(
+  user: AuthedUser,
+  request: Request,
+  options: VmProvisioningScopeOptions = {},
+): Promise<VmRouteAccountScope> {
+  const scope = resolveVmAccountScope(user, request, options);
+  if (!scope.ok) return scope;
+  if (isVmProGateBlocked(scope.entitlements)) {
+    return { ok: false, response: await vmRequiresProResponse(vmRequestLocale(request)) };
+  }
+  return scope;
+}
+
+export function resolveVmRouteAccountScope(
+  user: AuthedUser,
+  request: Request,
+): VmRouteAccountScope {
+  return resolveVmAccountScope(user, request);
+}
+
+function resolveVmAccountScope(
+  user: AuthedUser,
+  request: Request,
+  options: VmProvisioningScopeOptions = {},
+): VmRouteAccountScope {
+  const requestedBillingTeamId = options.requestedBillingTeamId ?? requestedVmTeamIdFromRequest(request);
+  try {
+    return {
+      ok: true,
+      requestedBillingTeamId,
+      entitlements: resolveVmEntitlements(user, process.env, {
+        requestedBillingTeamId,
+      }),
+    };
+  } catch (err) {
+    if (isVmBillingTeamResolutionError(err)) {
+      return { ok: false, response: vmBillingTeamErrorResponse(err) };
+    }
+    throw err;
+  }
+}
+
+export function vmBillingTeamErrorResponse(err: {
+  readonly code: "vm_billing_team_required" | "vm_billing_team_not_found";
+  readonly status: number;
+  readonly message: string;
+}): Response {
+  return vmErrorResponse({
+    error: err.code,
+    status: err.status,
+    message: err.code === "vm_billing_team_not_found"
+      ? "That team is not available for this account."
+      : "cmux needs to know which team should own this Cloud VM.",
+    action: err.code === "vm_billing_team_not_found"
+      ? "Switch to a team you belong to, or run `cmux auth login` again and retry with the correct team id."
+      : "Select a team in cmux, or pass the team id with `X-Cmux-Team-Id`.",
+  });
+}
+
+const VM_UPGRADE_URL = "https://cmux.com/pricing";
+
+/**
+ * The paid-plan gate response. Copy comes from the `vmErrors.requiresPro`
+ * catalog so non-English clients get a translated upgrade instruction; the
+ * machine-readable `upgradeUrl`/`upgradeRequired` fields stay locale-free.
+ */
+export async function vmRequiresProResponse(locale: Locale = "en"): Promise<Response> {
+  const copy = await vmRequiresProCopy(locale, { upgradeUrl: VM_UPGRADE_URL });
+  return vmErrorResponse({
+    error: "vm_requires_pro",
+    status: 402,
+    message: copy.message,
+    action: copy.action,
+    displayTitle: copy.title,
+    extra: { upgradeRequired: true, upgradeUrl: VM_UPGRADE_URL },
+  });
+}
+
+/**
+ * One response for every provisioning verb that hits the active-VM limit. On a free plan the
+ * limit is the paywall moment: the message sells the upgrade (Pro removes the cap and bills by
+ * usage) and `upgradeRequired`/`upgradeUrl` let clients render a real upgrade prompt instead of
+ * an error. Paid plans keep operational guidance — their cap is a safety rail, not a paywall.
+ */
+export function vmActiveLimitExceededResponse(input: {
+  readonly limit: number;
+  readonly planId: string;
+  readonly retryAction: string;
+  readonly phase?: VmLifecyclePhase;
+}): Response {
+  const paid = isPaidVmPlan(input.planId);
+  const plural = input.limit === 1 ? "" : "s";
+  if (paid) {
     return vmErrorResponse({
-      error: "vm_cloud_service_unavailable",
-      status: 502,
-      message: "The Cloud VM service could not complete this request.",
-      action: cloudServiceAction(err.operation),
-      details: { operation: err.operation },
+      error: "vm_active_limit_exceeded",
+      status: 402,
+      message: `This plan allows ${input.limit} active Cloud VM${plural} at a time.`,
+      action: input.retryAction,
+      extra: { limit: input.limit },
+      details: { limit: input.limit },
+      ...(input.phase ? { phase: input.phase } : {}),
+    });
+  }
+  if (input.limit <= 0) {
+    // Free plans have no allowance at all: this is the subscribe gate, not a
+    // "free a slot" situation.
+    const proLimit = maxActiveVmsForPlan("pro");
+    return vmErrorResponse({
+      error: "vm_active_limit_exceeded",
+      status: 402,
+      message: "Cloud VMs require a cmux Pro subscription.",
+      action: `Subscribe to cmux Pro at ${VM_UPGRADE_URL} to get access to Cloud VMs (up to ${proLimit} active machines).`,
+      extra: { limit: input.limit, upgradeRequired: true, upgradeUrl: VM_UPGRADE_URL },
+      details: { limit: input.limit, upgradeRequired: true },
+      ...(input.phase ? { phase: input.phase } : {}),
+    });
+  }
+  return vmErrorResponse({
+    error: "vm_active_limit_exceeded",
+    status: 402,
+    message: `The free plan includes ${input.limit} Cloud VM${plural}.`,
+    action: `Upgrade to cmux Pro at ${VM_UPGRADE_URL} for more active machines, ` +
+      "or free a slot with `cmux vm rm <id>`.",
+    extra: { limit: input.limit, upgradeRequired: true, upgradeUrl: VM_UPGRADE_URL },
+    details: { limit: input.limit, upgradeRequired: true },
+    ...(input.phase ? { phase: input.phase } : {}),
+  });
+}
+
+export type VmCreateLikeOperation = "fork" | "restore";
+
+/**
+ * Translate the provisioning failures shared by fork and restore routes.
+ * Operation-specific retry guidance stays at the route boundary, while the response
+ * shape and billing errors remain centralized here.
+ */
+export function vmCreateLikeErrorResponse(
+  err: unknown,
+  input: {
+    readonly operation: VmCreateLikeOperation;
+    readonly planId: string;
+    readonly retryAction: string;
+  },
+): Response | null {
+  if (isVmCreateInProgressError(err)) {
+    return vmErrorResponse({
+      error: "vm_create_in_progress",
+      status: 409,
+      message: "A Cloud VM create is already running for this request.",
+      action: `Wait for the first ${input.operation} to finish, then retry the same command.`,
+      details: { idempotencyKeySet: !!err.idempotencyKey },
+    });
+  }
+  if (isVmCreateFailedError(err)) {
+    return vmErrorResponse({
+      error: "vm_create_failed",
+      status: 500,
+      message: `The Cloud VM ${input.operation} create attempt failed.`,
+      action: `Retry with a fresh ${input.operation}. If it fails again, copy the details and contact support.`,
+      details: { idempotencyKeySet: !!err.idempotencyKey },
+    });
+  }
+  if (isVmLimitExceededError(err)) {
+    return vmActiveLimitExceededResponse({
+      limit: err.limit,
+      planId: input.planId,
+      retryAction: input.retryAction,
+    });
+  }
+  if (input.operation === "restore" && isVmSnapshotNotFoundError(err)) {
+    return vmErrorResponse({
+      error: "vm_snapshot_not_found",
+      status: 404,
+      message: "Cloud VM snapshot was not found for this account.",
+      action: "Create a snapshot from one of this team's Cloud VMs, then retry restore with that snapshot id.",
+      details: { snapshotId: err.snapshotId },
+    });
+  }
+  if (isVmCreateCreditsInsufficientError(err)) {
+    return vmErrorResponse({
+      error: "vm_create_credits_insufficient",
+      status: 402,
+      message: "This team has no Cloud VM create credits left.",
+      action: "Upgrade the team's plan or ask an admin to add Cloud VM create credits, then retry.",
+      extra: { amount: err.amount },
+      details: { amount: err.amount },
+    });
+  }
+  return null;
+}
+
+/** Translate a normalized workflow failure into the public VM error contract. */
+export async function vmWorkflowErrorResponse(
+  err: unknown,
+  options: { readonly locale?: Locale } = {},
+): Promise<Response | null> {
+  const workflowError = vmWorkflowErrorCause(err) ?? err;
+  const operationUnsupported = isVmOperationUnsupportedError(workflowError)
+    ? workflowError
+    : isVmProviderOperationError(workflowError)
+      ? vmWorkflowErrorCause(workflowError.cause)
+      : null;
+  if (isVmOperationUnsupportedError(operationUnsupported)) {
+    return vmUnsupportedOperationResponse(operationUnsupported, options.locale ?? "en");
+  }
+
+  if (isVmAccountDeletionInProgressError(workflowError)) {
+    return vmErrorResponse({
+      error: "account_deletion_in_progress",
+      status: 409,
+      message: "Account deletion is in progress.",
+      action: "Wait for account deletion to finish before creating Cloud VMs.",
+      phase: workflowError.phase ?? "create",
+      retryable: true,
     });
   }
 
-  if (isVmDatabaseError(err)) {
+  if (isVmAttachTransportUnsupportedError(workflowError)) {
+    const supported = workflowError.supported.join(", ");
+    return vmErrorResponse({
+      error: "vm_attach_transport_unsupported",
+      status: 409,
+      message: `Cloud VM ${workflowError.vmId} does not serve the "${workflowError.requested}" attach transport.`,
+      action: `Request the attach endpoint with transport "cmux-remote" (supported: ${supported}), ` +
+        "or update cmux — this machine runs the cmux-tui remote daemon only.",
+      phase: "attach",
+      retryable: false,
+      details: {
+        provider: workflowError.provider,
+        requestedTransport: workflowError.requested,
+        supportedTransports: [...workflowError.supported],
+      },
+    });
+  }
+
+  if (isVmCreateDisabledError(workflowError)) {
+    return vmErrorResponse({
+      error: "vm_create_disabled",
+      status: 503,
+      message: "Cloud VM creation is disabled for this environment.",
+      action: "Ask an admin to enable Cloud VM creation, then retry.",
+      reason: workflowError.reason,
+      phase: "create",
+      retryable: true,
+    });
+  }
+
+  if (isVmProviderOperationError(workflowError)) {
+    const providerCause = providerCauseSummary(workflowError.cause);
+    const phase = vmPhaseForOperation(workflowError.operation);
+    if (providerImageNotFound(workflowError.cause)) {
+      // The provider rejected the resolved image (e.g. Blaxel IMAGE_NOT_FOUND):
+      // nothing was created and retrying cannot help until an operator
+      // publishes the image, so this is configuration, not availability.
+      console.error(
+        "[vm-image-unavailable]",
+        JSON.stringify({
+          provider: workflowError.provider,
+          operation: workflowError.operation,
+          cause: providerCause?.message ?? String(workflowError.cause),
+        }),
+      );
+      return vmErrorResponse({
+        error: "vm_image_unavailable",
+        status: 503,
+        message: "The Cloud VM image for this machine is not available in this environment.",
+        reason: "The image this machine kind resolves to is not published for this environment.",
+        action:
+          "Ask an admin to publish the Cloud VM image for this environment, then retry. " +
+          "A different machine kind (for example `cmux vm new --base`) may still be available.",
+        phase,
+        retryable: false,
+        displayTitle: "Cloud VM image unavailable",
+        details: {
+          operation: workflowError.operation,
+          retryable: false,
+          providerCode: "provider_image_not_found",
+        },
+      });
+    }
+    const retryExhausted = providerRetryExhausted(workflowError.cause);
+    if (retryExhausted) {
+      // Keep the provider and operation in operator logs only. The response
+      // below deliberately contains no URL, status, or upstream body.
+      console.error("[vm-provider-retry-exhausted]", {
+        provider: workflowError.provider,
+        operation: workflowError.operation,
+      });
+    }
+    const retryAfterSeconds = retryAfterForOperation(workflowError.operation);
+    const providerMessage = !retryExhausted && providerCause?.message
+      ? sanitizedProviderMessage(providerCause.message)
+      : null;
+    const providerCode = retryExhausted
+      ? "provider_retry_exhausted"
+      : providerCause?.code
+        ? sanitizedProviderCode(providerCause.code)
+        : inferredProviderCode(providerMessage);
+    return vmErrorResponse({
+      error: "vm_cloud_service_unavailable",
+      status: 502,
+      message: vmUnavailableMessage(phase),
+      reason: retryExhausted
+        ? "The Cloud VM service is temporarily unavailable."
+        : providerMessage
+        ? `Cloud VM service is temporarily unavailable: ${providerMessage}`
+        : "Cloud VM service is temporarily unavailable.",
+      action: cloudServiceAction(workflowError.operation, retryAfterSeconds),
+      phase,
+      retryable: true,
+      retryAfterSeconds,
+      displayTitle: vmUnavailableTitle(phase),
+      displayMessage: vmUnavailableDisplayMessage(phase, retryAfterSeconds),
+      details: {
+        operation: workflowError.operation,
+        retryable: true,
+        ...(providerCode ? { providerCode } : {}),
+        ...(providerMessage ? { providerMessage } : {}),
+      },
+    });
+  }
+
+  if (isVmDatabaseError(workflowError)) {
     return vmErrorResponse({
       error: "vm_cloud_state_unavailable",
       status: 503,
       message: "Cloud VM state is temporarily unavailable.",
       action: "Retry in a minute. If this keeps happening, contact support so we can check Cloud VM state for your account.",
-      details: { operation: err.operation },
+      phase: vmPhaseForOperation(workflowError.operation),
+      retryable: true,
+      retryAfterSeconds: 60,
+      displayTitle: "Cloud VM state is unavailable",
+      displayMessage: "Retrying is safe. The VM state database did not answer this request.",
+      details: { operation: workflowError.operation },
     });
   }
 
-  if (isVmBillingError(err)) {
+  if (isVmBillingError(workflowError)) {
     return vmErrorResponse({
       error: "vm_billing_unavailable",
       status: 503,
       message: "Cloud VM billing could not be checked right now.",
       action: "Retry in a minute. If the problem persists, ask an admin to check this team's Cloud VM billing setup.",
-      details: { operation: err.operation },
+      phase: "billing",
+      retryable: true,
+      retryAfterSeconds: 60,
+      displayTitle: "Cloud VM billing is unavailable",
+      displayMessage: "Retrying is safe. Billing state could not be checked for this request.",
+      details: { operation: workflowError.operation },
     });
   }
 
   return null;
 }
 
-function cloudServiceAction(operation: string): string {
+async function vmUnsupportedOperationResponse(
+  error: VmOperationUnsupportedError,
+  locale: Locale,
+): Promise<Response> {
+  const phase = vmPhaseForOperation(error.operation);
+  const copy = await vmUnsupportedCopy(
+    phase === "snapshot" || phase === "restore" || phase === "fork" ? phase : "default",
+    locale,
+  );
+  return vmErrorResponse({
+    error: "vm_operation_unsupported",
+    status: 501,
+    message: copy.message,
+    reason: copy.reason,
+    action: copy.action,
+    phase,
+    retryable: false,
+    displayTitle: copy.title,
+    displayMessage: copy.message,
+    severity: "error",
+    diagnostics: { provider: error.provider },
+    details: {
+      operation: error.operation,
+      retryable: false,
+      providerCode: "provider_operation_unsupported",
+    },
+  });
+}
+
+/** Identify a retry wrapper whose provider details must stay in operator logs. */
+function providerRetryExhausted(cause: unknown): boolean {
+  let current: unknown = cause;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    const record = current as { name?: unknown; cause?: unknown };
+    if (record.name === "BlaxelRetryExhaustedError") return true;
+    current = record.cause;
+  }
+  return false;
+}
+
+/** True when the provider reported that the requested image/template does not exist. */
+function providerImageNotFound(cause: unknown): boolean {
+  let current: unknown = cause;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    const record = current as { body?: { code?: unknown }; cause?: unknown; message?: unknown };
+    const code = typeof record.body?.code === "string" ? record.body.code : "";
+    const message = typeof record.message === "string" ? record.message : "";
+    if (/IMAGE_NOT_FOUND|TEMPLATE_NOT_FOUND/i.test(code)) return true;
+    if (/IMAGE_NOT_FOUND|TEMPLATE_NOT_FOUND|(image|template)\s+'[^']*'\s+not found|(image|template) not found/i.test(message)) {
+      return true;
+    }
+    current = record.cause;
+  }
+  return false;
+}
+
+function providerCauseSummary(cause: unknown): { code?: string; message?: string } | null {
+  let current: unknown = cause;
+  let fallback: { code?: string; message?: string } | null = null;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    const record = current as {
+      body?: { code?: unknown; message?: unknown };
+      cause?: unknown;
+      message?: unknown;
+    };
+    const code = typeof record.body?.code === "string" ? record.body.code.trim() : "";
+    const bodyMessage = typeof record.body?.message === "string" ? record.body.message.trim() : "";
+    const message = typeof record.message === "string" ? record.message.trim() : "";
+    const summaryMessage = bodyMessage || message;
+    if (code) {
+      return {
+        code,
+        ...(summaryMessage ? { message: summaryMessage } : {}),
+      };
+    }
+    if (!fallback && summaryMessage) fallback = { message: summaryMessage };
+    current = record.cause;
+  }
+  return fallback;
+}
+
+function cloudServiceAction(operation: string, retryAfterSeconds: number | undefined): string {
+  const retryPrefix = retryAfterSeconds
+    ? `cmux will retry in about ${retryAfterSeconds}s when this request is part of an attach loop. `
+    : "";
   switch (operation) {
     case "create":
-      return "Retry once. If it fails again, run `cmux vm ls` to check whether a VM was created, then try `cmux vm new` again or contact support.";
+      return `${retryPrefix}Retry once. If it fails again, run \`cmux vm ls\` to check whether a VM was created, then try \`cmux vm new\` again or contact support.`;
     case "openAttach":
     case "openSSH":
-      return "Run `cmux vm ls` to confirm the VM still exists. If it was paused or destroyed, start a fresh VM with `cmux vm new`.";
+      return `${retryPrefix}cmux is retrying attach while the Cloud VM service recovers. Run \`cmux vm ls\` to confirm the VM still exists.`;
     case "exec":
-      return "Check that the VM is still running with `cmux vm ls`, then retry the command. For long commands, increase the exec timeout.";
+      return `${retryPrefix}Check that the VM is still running with \`cmux vm ls\`, then retry the command. For long commands, increase the exec timeout.`;
     case "destroy":
-      return "Run `cmux vm ls` to see whether the VM is already gone. If it still appears, retry `cmux vm rm <id>`.";
+      return `${retryPrefix}Run \`cmux vm ls\` to see whether the VM is already gone. If it still appears, retry \`cmux vm rm <id>\`.`;
     default:
-      return "Retry the command. If it keeps failing, copy this error and contact support.";
+      return `${retryPrefix}Retry the command. If it keeps failing, copy this error and contact support.`;
   }
+}
+
+function defaultVmDisplayTitle(input: VmErrorResponseInput): string {
+  // Billing-team resolution shares the 409/403 statuses with unrelated
+  // failures; title it as the team problem it is instead of the generic
+  // "operation already running" that pure-status mapping would produce.
+  if (input.error === "vm_billing_team_required" || input.error === "vm_billing_team_not_found") {
+    return "Cloud VM team required";
+  }
+  if (input.status === 409) return "Cloud VM operation already running";
+  if (input.status === 404) return "Cloud VM not found";
+  if (input.status === 401 || input.status === 403) return "Cloud VM authentication required";
+  if (input.status === 402) return "Cloud VM limit reached";
+  if (input.status >= 500) return "Cloud VM temporarily unavailable";
+  return "Cloud VM request failed";
+}
+
+function normalizedRetryAfterSeconds(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.max(1, Math.min(3600, Math.round(value)));
+}
+
+function vmPhaseForOperation(operation: string): VmLifecyclePhase {
+  if (operation.includes("openAttach")) return "attach";
+  if (operation.includes("openSSH")) return "ssh";
+  if (operation.includes("create")) return "create";
+  if (operation.includes("restore")) return "restore";
+  if (operation.includes("fork")) return "fork";
+  if (operation.includes("snapshot")) return "snapshot";
+  if (operation.includes("resume")) return "resume";
+  if (operation.includes("exec")) return "exec";
+  if (operation.includes("destroy")) return "destroy";
+  if (operation.includes("getStatus")) return "status";
+  if (operation.includes("list")) return "list";
+  return "unknown";
+}
+
+function retryAfterForOperation(operation: string): number | undefined {
+  const phase = vmPhaseForOperation(operation);
+  switch (phase) {
+    case "attach":
+    case "ssh":
+      return 2;
+    case "create":
+    case "restore":
+    case "fork":
+      return 5;
+    case "exec":
+    case "status":
+      return 3;
+    default:
+      return undefined;
+  }
+}
+
+function vmUnavailableTitle(phase: VmLifecyclePhase): string {
+  switch (phase) {
+    case "attach":
+      return "Reconnecting Cloud VM";
+    case "ssh":
+      return "Refreshing Cloud VM credentials";
+    case "create":
+      return "Creating Cloud VM";
+    case "restore":
+      return "Restoring Cloud VM";
+    case "fork":
+      return "Forking Cloud VM";
+    case "exec":
+      return "Cloud VM command unavailable";
+    default:
+      return "Cloud VM temporarily unavailable";
+  }
+}
+
+function vmUnavailableMessage(phase: VmLifecyclePhase): string {
+  switch (phase) {
+    case "attach":
+      return "cmux could not attach to the Cloud VM yet.";
+    case "ssh":
+      return "cmux could not refresh Cloud VM SSH credentials yet.";
+    case "create":
+      return "cmux could not create the Cloud VM yet.";
+    case "restore":
+      return "cmux could not restore the Cloud VM yet.";
+    case "fork":
+      return "cmux could not fork the Cloud VM yet.";
+    case "exec":
+      return "cmux could not run the Cloud VM command yet.";
+    default:
+      return "The Cloud VM service could not complete this request yet.";
+  }
+}
+
+function vmUnavailableDisplayMessage(phase: VmLifecyclePhase, retryAfterSeconds: number | undefined): string {
+  const suffix = retryAfterSeconds ? ` Retrying in ${retryAfterSeconds}s.` : " Retrying is safe.";
+  return `${vmUnavailableMessage(phase)}${suffix}`;
+}
+
+function sanitizedProviderMessage(message: string): string {
+  const normalized = message.trim();
+  if (!normalized) return "";
+  if (/internal/i.test(normalized) && /error/i.test(normalized)) return "internal service error";
+  if (/timeout|timed out|aborted/i.test(normalized)) return "request timed out";
+  if (/rate[_\s-]*limit|too many requests/i.test(normalized)) return "rate limited";
+  if (/not found|deleted/i.test(normalized)) return "VM not found";
+  return normalized
+    .replace(/freestyle/gi, "Cloud VM")
+    .replace(/e2b/gi, "Cloud VM")
+    .slice(0, 240);
+}
+
+function sanitizedProviderCode(code: string): string {
+  const normalized = code.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!normalized) return "";
+  if (normalized.includes("internal")) return "provider_internal";
+  if (normalized.includes("timeout") || normalized.includes("aborted")) return "provider_timeout";
+  if (normalized.includes("rate")) return "provider_rate_limited";
+  if (normalized.includes("not_found") || normalized.includes("deleted")) return "provider_not_found";
+  return normalized.slice(0, 80);
+}
+
+function inferredProviderCode(message: string | null): string | null {
+  if (!message) return null;
+  if (message === "internal service error") return "provider_internal";
+  if (message === "request timed out") return "provider_timeout";
+  if (message === "rate limited") return "provider_rate_limited";
+  if (message === "VM not found") return "provider_not_found";
+  return null;
 }
 
 export function requestedVmTeamIdFromRequest(request: Request): string | null {
@@ -200,14 +890,14 @@ export function requestedVmTeamIdFromRequest(request: Request): string | null {
   );
 }
 
-function requiresBrowserMutationProtection(method: string, bearer: StackBearer | null): boolean {
+export function requiresBrowserMutationProtection(method: string, bearer: StackBearer | null): boolean {
   if (!["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase())) {
     return false;
   }
   return bearer === null;
 }
 
-function browserMutationOriginAllowed(request: Request): boolean {
+export function browserMutationOriginAllowed(request: Request): boolean {
   const origin = request.headers.get("origin")?.trim();
   const secFetchSite = request.headers.get("sec-fetch-site")?.trim().toLowerCase();
 

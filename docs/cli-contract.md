@@ -66,7 +66,8 @@ Environment:
 | `disable-browser` | Disable cmux browser creation and link interception until re-enabled. |
 | `enable-browser` | Re-enable cmux browser creation and link interception. |
 | `browser-status` | Print whether cmux browser creation and link interception are enabled. |
-| `agent-hibernation` | Enable or disable Agent Hibernation. |
+| `agent-hibernation` | Enable or disable routine Agent Hibernation. |
+| `restore` | Replace the CLI with a process restored from structured surface state. |
 | `restore-session` | Restore the previously saved cmux session. |
 | `open` | Open files, directories, or URLs in cmux. |
 | `feedback` | Open feedback UI or submit feedback with `--email`, `--body`, and repeated `--image`. |
@@ -82,8 +83,10 @@ Environment:
 | `ping` | Check socket connectivity. |
 | `capabilities` | Print server capabilities as JSON. |
 | `events` | Stream reconnectable cmux events as newline-delimited JSON. |
+| `sessions [list]` | List saved agent session records without requiring a running cmux socket. Filters: `--agent <name>`, `--session <id>`, `--workspace <id>`, `--surface <id>`, `--cwd <text>`. Overrides: `--state-dir <path>`, `--codex-home <path>`. Text output defaults to 100 results; `--limit <n>` takes a positive integer and `--all` removes the limit. Supports `--json`. |
 | `auth` | Manage auth status, login, and logout through the app. |
 | `vm`, `cloud` | Manage cloud VMs. `cloud` is an alias for `vm`. |
+| `remotes`, `remote` | Manage remote Macs in the team device registry so they appear in the iOS app's device list. `remote` is an alias for `remotes`. |
 | `rpc` | Call a raw v2 socket method with optional JSON params. |
 | `identify` | Print server identity and caller context. |
 | `list-windows` | List windows. |
@@ -91,13 +94,19 @@ Environment:
 | `new-window` | Create a new window. |
 | `focus-window` | Focus a window by handle. |
 | `close-window` | Close a window by handle. |
+| `window displays` | List connected displays (name, index, main flag). |
+| `window display <name\|index>` | Move the instance's window(s) onto a display by name (exact, substring) or index, preserving size. Does not steal focus. With `--window`, targets that window; otherwise moves all main windows. `--list` aliases `window displays`. |
+| `window default-display [<name>\|--clear]` | Set, show (no arg), or clear (`--clear`) the shared, cross-tag default display that DEBUG dev builds open new windows on, stored in `~/.config/cmux/cmux.json` under `app.devWindowDisplay`. No running app required; applied at window creation. Also settable in Debug > Debug Windows > Dev Window Display. |
 | `move-workspace-to-window` | Move a workspace into a target window. |
 | `reorder-workspace` | Reorder a workspace inside a window. |
 | `reorder-workspaces` | Atomically reorder workspaces inside pinned and unpinned groups. |
 | `workspace-action` | Run workspace context-menu actions from the CLI. |
+| `workspace` | Namespace for workspace verbs: `list`, `create`, `env`, `close`, `rename`, `select`, `status`, `reconnect`, `disconnect`, `group`. `workspace status` prints the workspace's todo lifecycle status (effective, inferred, override); `workspace status set <todo\|working\|needs-attention\|review\|done\|auto>` pins a manual lane (`auto` clears it; a pinned lane auto-clears once the inferred lane changes). `workspace env` prints a workspace's configured environment variables (see [Workspace environment variables](#workspace-environment-variables)); pass `--mask` to redact the values. `workspace reconnect` manually reconnects a remote (SSH) workspace — including one whose automatic reconnect suspended because the host was unreachable — and `workspace disconnect` stops its remote connection. `env`, `reconnect`, and `disconnect` accept a positional workspace handle or `--workspace <id\|ref\|index>`, defaulting to the caller's workspace, then the selected one. |
+| `todo` | Per-workspace checklist namespace: `add "text" [--state <pending\|in-progress\|completed>] [--origin <user\|agent>]`, `list`, `check <index\|id>`, `uncheck <index\|id>`, `start <index\|id>` (in-progress), `edit <index\|id> "text"`, `rm <index\|id>`, `clear`, `set ['<json>']` (atomic replace from a JSON item array, inline or piped on stdin), `open` (open or focus the workspace's todo pane). Targets the caller's workspace by default with `--workspace <id\|ref\|index>` override; `<index>` is the 1-based number printed by `todo list`. Items cap at 50 per workspace. See [Workspace todos](#workspace-todos). |
+| `comments` | Diff review comments namespace: `list` (alias `ls`) `[--repo <path>] [--all] [--json]` — read-only listing of review comments saved from the diff viewer for one git repository (default: the repository containing the current directory). Pending comments only by default; `--all` includes comments already delivered to an agent through a TextBox submission. Backed by the socket v2 method `comments.list`. |
 | `move-tab-to-new-workspace` | Move a tab or surface into a newly created workspace. |
 | `list-workspaces` | List workspaces. |
-| `new-workspace` | Create a workspace, optionally with cwd, command, description, and layout. |
+| `new-workspace` | Create a workspace, optionally with cwd, command, description, layout, and per-workspace environment variables (`--env KEY=VALUE` repeatable, `--env-file <path>`). See [Workspace environment variables](#workspace-environment-variables). |
 | `ssh` | Open an SSH-backed workspace. Preserves the caller's live `SSH_AUTH_SOCK` for app-launched OpenSSH processes so `ForwardAgent yes` from ssh_config works normally. Supports `-A` / `--forward-agent` to request forwarding and `-a` / `--no-forward-agent` to disable forwarding for a workspace. Agent forwarding remains opt-in because forwarded agents can be used by processes on the remote host while the SSH session is active. |
 | `remote-daemon-status` | Print bundled remote daemon version, asset, checksum, and cache status. |
 | `ssh-session-list` | List persisted SSH PTY sessions for one remote workspace or all remote workspaces. Supports `--json`. |
@@ -173,6 +182,24 @@ Environment:
 
 ## Command Families
 
+Sessions output:
+
+`cmux sessions [list]` reads saved hook state from disk and never connects to a
+cmux socket. By default the listing includes records that are active for a
+workspace or surface, restorable, launch-backed, or transcript-backed. Passing
+`--all`, or any record filter (`--session`, `--workspace`, `--surface`,
+`--cwd`), includes every record that matches the filters. `--json` prints one
+object with:
+
+| Field | Contract |
+| --- | --- |
+| `state_dir` | Hook state directory the session stores were read from. |
+| `default_codex_home` | Codex home used for transcript checks. |
+| `total_matches` | Number of matching records, counted before `--limit` is applied. |
+| `limit` | Applied result limit, or `null` when `--all` removes it. |
+| `stores` | Per-agent hook store files that were read: `agent`, `path`, `exists`, `session_count`. |
+| `sessions` | The limited result set of session records. |
+
 Auth subcommands:
 
 | Command | Contract |
@@ -186,13 +213,52 @@ VM subcommands:
 | Command | Contract |
 | --- | --- |
 | `vm ls`, `vm list` | List VMs. |
-| `vm new`, `vm create` | Create a VM. Supports `--image`, `--provider`, `--detach`, and `-d`. |
-| `vm shell`, `vm attach` | Open an interactive shell for an existing VM. |
+| `vm tree [<machine>\|local] [--refresh] [--json]` | The surface catalog (`surface.catalog`), rendered Finder-style: **This Mac** first (its terminals grouped by the local workspace showing them, then its browsers), then every cloud machine — the cmux-tui workspaces on it, each workspace's terminals (title, cwd, lifecycle, agent state, and the pane that already shows it), `desktop`, and forwarded `ports/`. Every line carries an address `vm open` or `surface open` accepts. `--refresh` re-syncs every provider first. `--json` prints the catalog payload `{machines: [{id, local, name, status, image, has_desktop, memory_mb, disk_mb, link_state, link_error, cpu_percent, memory_used_mb, disk_used_mb}], resources: [{id, machine, kind: terminal\|screen\|browser, key, title, detail, lifecycle, agent, remote_workspace, port, url, open, open_surface_ids, open_workspace_ids}], projections: [{resource, workspace_id, surface_id}]}`. Same as `surface ls`. |
+| `vm workspace new <machine> [--name <name>] [--json]` | `vm.workspace_new`: creates a cmux-tui workspace on the machine (its ⌘N, with a first terminal) and opens it as a new local workspace. Prints `OK workspace=<local id> remote_workspace=<ws id> machine=<id>`. |
+| `vm workspace open <machine> <workspace-id> [--here] [--tabs] [--workspace <local>] [--pane <id\|ref> [--left\|--right\|--up\|--down]] [--json]` | `vm.workspace_open`: the machine workspace's terminals and browsers as a new local workspace, one pane each (what clicking the sidebar row does). `--here`/`--tabs`/`--pane`+side instead project the group into an existing local workspace (`here: true` + the `surface open` destination params; one pane at the destination, the rest as tabs) — the sidebar's "Open All Here" / "Open All in New Tabs" / drop on a pane edge. |
+| `vm prompt [--json]` / `vm prompt --open <agent>` (alias `skill`) | `vm.cloud_prompt` / `vm.cloud_agent_open`: installs the bundled cmux-cloud skill file at `~/.config/cmux/skills/cmux-cloud.md` and prints the kickoff prompt for any agent (the Machines panel's "Copy Cloud Prompt"), or opens a local terminal running claude\|codex\|opencode with it ("Open Cloud Agent"). |
+| `vm workspace rename <machine> <workspace-id> <name> [--json]` | `vm.workspace_rename`: renames the cmux-tui workspace (the sidebar row's "Rename…"). |
+| `vm workspace close <machine> <workspace-id> [--json]` | `vm.workspace_close`: closes the cmux-tui workspace; its terminals keep running in the Terminals pool (CLI-only; the sidebar's "Close Workspace…" is `vm workspace rm`). |
+| `vm workspace rm <machine> <workspace-id> [--json]` (alias `delete`) | `vm.workspace_delete`: kills every terminal viewed in the workspace, then closes it (the sidebar row's "Close Workspace…" and its hover ×). Prints how many terminals were closed. |
+| `vm terminal close <machine> <terminal-id> [--json]` | `vm.terminal_close`: ends a terminal on the machine; an exited terminal is removed through its tab. |
+| `vm terminal send <machine> <terminal-id> [text] [--keys <k1,k2,…>] [--json]` (alias `write`) | `vm.terminal_write {id, terminal_id, text?, keys?}`: types `text` into the machine terminal exactly as given (no newline), then presses the named keys (`enter`, `tab`, `escape`, `up`, …; chords join with `+`: `ctrl+c`) — cmux-tui `terminal <id> write --text` / `keys`. Headless: no pane is attached or focused. |
+| `vm terminal read <machine> <terminal-id> [--json]` (alias `screen`) | `vm.terminal_read {id, terminal_id}`: the terminal's visible screen (`text`; `--json` adds `rows`, `cols`, `cursor_row`, `cursor_col`, `cursor_visible`) — cmux-tui `terminal <id> screen read`. |
+| `vm terminal wait <machine> <terminal-id> --pattern <regex> [--timeout <seconds>] [--json]` | `vm.terminal_wait {id, terminal_id, pattern, timeout_ms?}`: blocks until the screen text matches (default 30 s) — cmux-tui `terminal <id> screen wait`. Prints `OK matched …`; exits 1 with the screen tail on timeout. |
+| `vm new`, `vm create` | Create a VM with a desktop (screen + noVNC) by default; `--base` makes a shell-only machine. The CLI sends the machine **kind** (`desktop`/`base`) and the backend maps it to the image its deployment supports; `--image <id>` is the explicit override and is the only way an image id leaves the client. Supports `--size <2g|4g|8g|16g|24g|32g>`, `--name <label>` (display label, applied via `vm.rename` after create), `--provider`, `--workspace`, `--detach`, and `-d`. Without `--detach`, opens a plain terminal on the machine through the shared open path (see `vm shell`). The Machines panel's ＋ opens the New Machine sheet (name, kind, size, plan meter) whose Create runs this same command. |
+| `vm base open`, `vm base reset` | Open (creating on first use) or reset the persistent Base machine. `--base` / `--desktop` choose the kind for the create; an existing Base keeps its image. The app's Cloud VM button shows the Set Up Base sheet only when no Base exists yet. |
+| `vm shell`, `vm attach` | Open an interactive shell for an existing VM. Every cloud open (`vm shell` / `vm new` / `vm fork` / `vm restore` / `vm base open` / `vm base reset`, the Machines panel, the sidebar cloud button) uses one path and lands a PLAIN terminal on the machine (like an ssh session, not the cmux-tui client): `vm.cmux_remote_info` (availability and protocol check; the local client's `client_capabilities` when one is installed), then `workspace.create` or, for `--workspace`, `workspace.cloud_vm_terminal_ready` (a placeholder pane), then `workspace.cloud_vm_bind`, then `surface.new_terminal {machine, open: true, workspace_id, focus: true, name: "shell"}` — the machine's provider creates a `bash -l` terminal in its cmux-tui session (a catalog resource `<machine>/terminal/<term_…>`) and the catalog projects it into the workspace as a pane running `attach --terminal`; the placeholder is closed with `surface.close`. The `OK` line carries `terminal=<term_…>` and a `Reattach: cmux vm open <m>/<ws>/<term>` hint; `--json` adds `terminal_id`, `remote_workspace_id`, `surface_id`. `cmux vm tui <id>` is the only open that runs the full client. The websocket/SSH transports remain only for deployments whose control plane reports no cmux-tui daemon; a machine that answers `vm_attach_transport_unsupported` is cmux-tui only and never falls back. |
+| `vm stats <id>`, `vm top <id>` | Print CPU, memory, and disk for the machine right now; a sleeping machine reports `asleep` and is not woken. |
+| `vm desktop <id>`, `vm vnc <id>` | Open the VM's noVNC desktop as a browser pane in the machine's open workspace, else the workspace you are in (or `--workspace <id|ref|index>`); desktop-image machines only. One path with `vm open <id>:desktop`, the split beside `vm shell`, and the sidebar tree: `vm.desktop_open {id, workspace_id?, focus}` (focus defaults to false so the pane never steals typing from the shell). |
+| `vm rename <id> <label>`, `vm rename <id> --clear` | Set or clear a display label; the machine id stays its address. |
 | `vm rm`, `vm destroy`, `vm delete` | Destroy a VM. |
 | `vm ssh` | Open a cmux-managed SSH workspace for an existing VM. |
 | `vm ssh-info` | Print SSH connection info. |
 | `vm ssh-attach` | Internal attach helper. |
 | `vm exec` | Run a shell command inside a VM. |
+| `vm tui <id>` | Open the FULL cmux-tui client (its own workspaces/panes/tabs) in a pane — every other open gives a plain terminal instead; enrolls this Mac's device on first use (hidden helpers, used only by this command: `vm-tui-connect --config <file>` execs the local cmux-tui client in the pane; `vm-tui-approve --id <vm> --invitation-id <id> [--invite-file <path>]` is the detached process that approves the pending enrollment through the app and removes the invite file). |
+| `vm run -- <command...>` | Run a command without naming a machine: reuses an idle machine the router provisioned earlier (persisted in `~/.cmuxterm/vm-run-pool.json`, labeled `agent-pool`), wakes a sleeper, or provisions a fresh one; `--sync` pushes the cwd first, `--pull <remote>` fetches results, and the remote exit code passes through. |
+| `vm push <id> <local> [remote]`, `vm upload` | Copy a local file or directory onto a VM over the exec channel (base64-chunked, SHA-256 verified; directories travel as tarballs). |
+| `vm pull <id> <remote> [local]`, `vm download` | Copy a file or directory from a VM to local disk over the exec channel. |
+| `vm wait <id>` | Block until the VM reports a ready status; `--wake` also runs a trivial exec so a sleeping machine is awake, `--timeout <seconds>` bounds the wait. |
+| `vm open <id> <port> [--print]` | The port form (unchanged): mint a tokened URL for an HTTP port on the VM and open it as a browser pane (`vm.port_open {id, port, workspace_id?}`); `--print` only mints and prints the URL (`vm.open_port`). Same as `vm open <id>:port/<port>`. |
+| `vm open <target> [--workspace <id\|ref\|index>] [--focus <true\|false>]` | Open a tree address. `<machine>` is the machine's shell (exactly `vm shell <machine>`). `<machine>/<ws>` (a `ws_…` id or workspace name) opens that cmux-tui workspace's focused/first live terminal, or starts one there when it is empty (`surface.new_terminal {machine, remote_workspace_id, open: true}`). `<machine>/<ws>/<term_…>` opens one terminal (`surface.project {resource: "<machine>/terminal/<term_…>", workspace_id?, focus?}`), reusing the pane that already shows it (`reused: true`). `<machine>:desktop` is `vm desktop`. `<machine>:port/<n>` is the port form. Prints `OK surface=… workspace=… terminal=…`; `--json` prints the socket payload. Anything else is a usage error. |
+| `vm route [--cwd <dir>] [--new] [--provision] [--size <s>] [--json]` | Print the machine `vm run` / `vm agent` would use for a directory and why (the router's own policy: the machine bound to the directory, then an awake idle pool machine, then a sleeper), without running anything. When routing would provision a fresh machine it prints that and stops unless `--provision` is passed. |
+| `vm agent --agent <claude\|codex\|opencode\|pi> [--machine <id>] [--sync] [--cwd <dir>] [--name <name>] [--no-open] [--new] [--size <s>] [--json] -- <prompt or args...>` | Start a coding agent on a cloud machine chosen like `vm run` (or pinned with `--machine`), as a detached terminal in the machine's cmux-tui session (`surface.new_terminal {machine, command, cwd, name, open}`; the command is a login shell that puts `/root/.npm-global/bin` first). A bare prompt uses the agent's one-shot form (`claude -p`, `codex exec`, `opencode run`, `pi -p`); flag- or subcommand-led args pass through. `--sync` pushes the directory to `work/<basename>` first and starts the agent there. Prints the terminal, the workspace, and the `vm open <machine>/<ws>/<term>` reattach address; exits as soon as the terminal starts. |
+| `surface ls [<machine>\|local] [--refresh] [--json]` | The surface catalog, exactly `vm tree` (This Mac and every cloud machine). |
+| `surface open <resource> [--workspace <id\|ref\|index>] [--pane <id\|ref>] [--left\|--right\|--up\|--down\|--tab] [--new] [--focus <true\|false>] [--json]` | Put one surface in a pane through the single open path (`surface.project {resource, workspace_id?, pane_id?, direction?, placement?, reuse?, focus?}` → `{surface_id, workspace_id, reused, resource}`). `<resource>` is `<machine>/<kind>/<key>` from `surface ls --json` (`local/terminal/<uuid>`, `<m>/terminal/<term_…>`, `<m>/screen/display:1`, `<m>/browser/port:<n>`). Reuses the pane already showing the resource unless `--new`; `--pane` + a side splits that pane on that side, `--tab` adds a tab to it, otherwise the workspace's focused pane; a local terminal moves to the destination (it is shown once). Prints `OK surface=… workspace=… resource=… [reused=true]`. |
+| `surface new-terminal --machine <id\|local> [--cwd <dir>] [--name <name>] [--remote-workspace <ws_…>] [--workspace <id\|ref\|index>] [--no-open] [--json] [-- <command...>]` | Create a terminal on a machine through its provider (`surface.new_terminal {machine, command?, cwd?, name?, remote_workspace_id?, open?, workspace_id?, …}` → `{resource, terminal_id, machine, remote_workspace_id, workspace_id?, surface_id?}`) and open it as a pane unless `--no-open`. Cloud terminals land in the machine's cmux-tui session (`--remote-workspace` picks the workspace); local ones are a new shell on This Mac. |
+| `vm tools <id>`, `vm tool-inspector <id>` | Inspect installed tools inside the VM. |
+| `vm ports <id>` | Show listening TCP ports inside the VM. |
+| `vm handoff <id>` | Print a short attach handoff block. |
+| `vm promote-template <id>` | Promote the VM into a reusable template. |
+
+Remotes subcommands:
+
+| Command | Contract |
+| --- | --- |
+| `remotes list`, `remotes ls` | List the team's registered remotes (name, deviceId, routes, tag, last seen). Supports `--json`. |
+| `remotes add <name>` | Register or update a remote with one or more `--route <host:port>`. Supports `--tag` and `--json`. Idempotent on `<name>` (re-adding updates routes). The host must be a Tailscale address the phone can authenticate to (CGNAT `100.64.x.x`-`100.127.x.x` or `*.ts.net`); loopback, plain LAN IPs, and bare hostnames are rejected. |
+| `remotes remove <name-or-deviceId>` | Remove a remote you registered. Aliases `rm`, `delete`. Supports `--json`. |
 
 Theme subcommands:
 
@@ -211,6 +277,52 @@ Workspace and tab action names:
 | --- | --- |
 | `workspace-action` | `pin`, `unpin`, `rename`, `clear-name`, `set-description`, `clear-description`, `move-up`, `move-down`, `move-top`, `close-others`, `close-above`, `close-below`, `mark-read`, `mark-unread`, `set-color`, `clear-color` |
 | `tab-action` | `rename`, `clear-name`, `close-left`, `close-right`, `close-others`, `new-terminal-right`, `new-browser-right`, `reload`, `duplicate`, `pin`, `unpin`, `mark-unread` |
+
+### Workspace environment variables
+
+A workspace can carry a set of user-defined environment variables that every
+shell spawned in it inherits.
+
+Setting them:
+
+- CLI: `cmux new-workspace --env KEY=VALUE [--env ...] [--env-file <path>]`
+  (and the same flags on `cmux workspace create`). `--env` is repeatable;
+  `--env-file` reads `KEY=VALUE` lines (blank lines and `#` comments ignored, an
+  optional leading `export ` stripped). When both are given, `--env` overrides a
+  value from a file.
+- Project config (`cmux.json`): an `env` object on a workspace definition, e.g.
+  `{ "name": "Build", "cwd": ".", "env": { "AWS_PROFILE": "prod" } }`.
+- Socket: the `workspace_env` param on `workspace.create`.
+
+Inspecting them: `cmux workspace env [<handle>] [--mask] [--json]` prints the
+configured set. `--mask` redacts the values so secrets are not echoed in full.
+The env set is intentionally omitted from `workspace list` output so a plain
+listing never leaks secrets.
+
+Semantics:
+
+- **Inheritance.** The variables apply to the workspace's initial shell and to
+  every pane, surface, and split created later in that workspace — no per-pane
+  re-export. They are also re-applied to every shell recreated on session
+  restore.
+- **Persistence.** They are stored on the workspace in the session manifest, so
+  they survive app restart, daemon restart, and session restore.
+- **Precedence.** Workspace env overlays the inherited process environment. It is
+  applied as the shell's startup environment, so it is visible to login-shell
+  init files (`~/.zprofile`, `~/.zshrc`) as they run, but any `export` those
+  files perform for the same key wins for the interactive session (they run after
+  the variable is seeded). An explicit per-surface environment (a layout
+  `surfaces[].env`, SSH startup env) overrides the workspace value for that
+  surface.
+- **Protected `CMUX_*` variables.** Workspace env can never override the managed
+  variables cmux injects (e.g. `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID`,
+  `CMUX_SOCKET_PATH`, `CMUX_SOCKET_PASSWORD`) or the terminal identity variables
+  (`TERM`, `COLORTERM`, `TERM_PROGRAM`); those keys are protected at spawn time
+  and silently win.
+- **Secrets.** Values may be secrets. They are never logged, are masked by
+  `--mask`, and are kept out of `workspace list`. Prefer `--env-file` so secrets
+  do not land in shell history. Note that values stored in the session manifest
+  live on disk in plaintext.
 
 tmux compatibility commands:
 
@@ -250,7 +362,7 @@ Browser subcommands:
 | `browser wait` | Wait for selector, text, URL, load state, or JS predicate. |
 | `browser click`, `browser dblclick`, `browser hover`, `browser focus`, `browser check`, `browser uncheck`, `browser scroll-into-view` | Run element interaction. |
 | `browser type`, `browser fill` | Type into or set an input. |
-| `browser press`, `browser key`, `browser keydown`, `browser keyup` | Send keyboard input. |
+| `browser press`, `browser key`, `browser keydown`, `browser keyup` | Send keyboard input as `--key <key>` or positional `<key>` using Playwright/W3C names such as `Enter`, `Tab`, `Escape`, `ArrowLeft`, and `Space`. `Space`, `Spacebar`, and `space` emit DOM key `" "` with code `"Space"`; raw `--key ' '` is also accepted. |
 | `browser select` | Select an option. |
 | `browser scroll` | Scroll page or element. |
 | `browser screenshot` | Save a screenshot. |
@@ -262,14 +374,15 @@ Browser subcommands:
 | `browser download` | Wait for or save downloads. |
 | `browser profiles` | List, add, rename, clear, or delete cmux browser profiles. `clear` refuses to wipe active profiles unless `--force` is passed. |
 | `browser import` | Open the browser import wizard. In detected coding-agent environments, defaults to non-interactive cookie import; pass `--interactive` to force the wizard. Non-interactive import supports `--from`, `--profile`, `--all-profiles`, `--to-profile`, `--create-profile`, and `--domain`. |
-| `browser cookies` | Get, set, or clear cookies. |
+| `browser cookies` | Get, set, or clear cookies; `set` accepts `--http-only` to keep the cookie hidden from page JavaScript. `clear` requires an explicit scope such as `--url`, `--domain`, `--name`, or `--all`, and returns the removed count as `cleared` in JSON output. |
 | `browser storage` | Get, set, or clear local/session storage. |
 | `browser tab` | Create, list, switch, or close browser tabs. |
 | `browser console`, `browser errors` | List or clear console messages and errors. |
 | `browser highlight` | Highlight an element. |
 | `browser state` | Save or load browser state. |
 | `browser addinitscript`, `browser addscript`, `browser addstyle` | Inject scripts or CSS. |
-| `browser viewport` | Set viewport size. |
+| `browser viewport <width> <height>` | Emulate an exact logical viewport from 1×1 through 4096×4096 CSS pixels. WKWebView aspect-fits the page inside its current pane without resizing the pane or changing focus; screenshots use the emulated dimensions. |
+| `browser viewport reset` | Restore native viewport sizing so the page follows its pane dimensions. |
 | `browser geolocation`, `browser geo` | Set geolocation. |
 | `browser offline` | Toggle offline state. |
 | `browser trace` | Start or stop trace capture. |
@@ -277,6 +390,33 @@ Browser subcommands:
 | `browser screencast` | Start or stop screencast. |
 | `browser input`, `browser input_mouse`, `browser input_keyboard`, `browser input_touch` | Send low-level input. |
 | `browser identify` | Identify browser surface context. |
+
+`browser screenshot` reports `screenshot_mismatch` when conservative DOM/pixel
+attestation still disagrees after its retry, `timeout` when capture cannot
+complete within its bounded budget or another capture is already in progress,
+and `internal_error` for other failures. Clients may retry `timeout` and
+`screenshot_mismatch`; cmux does not return the suspect image.
+
+`browser viewport` changes the selected browser surface only. On WKWebView, the
+requested logical size becomes `window.innerWidth`/`window.innerHeight` and the
+page is uniformly scaled to fit inside the existing pane. The pane layout and
+other surfaces do not move. Visible screenshots are normalized to exactly those
+CSS-pixel dimensions, independent of the display backing scale. JSON results
+report `mode`, effective `width` and `height`, displayed size, `scale`,
+`presentation`, and `pane_resized`. `reset` reports the actual native CSS
+viewport, including the current page zoom.
+
+cmux bounds the combined viewport and page-zoom render geometry to 8192 points
+per dimension and 33,554,432 points of area. If the current zoom would exceed
+that bound, `browser.viewport.set` leaves the current viewport unchanged and
+returns `invalid_params` with
+`reason: viewport_zoom_render_geometry_too_large`, `requested_page_zoom`, and
+`maximum_page_zoom`. While emulation is active, browser zoom commands also stop
+at that maximum. A visible attached browser inspector owns the same layout;
+close or detach it before changing the viewport. In that state the v2 method
+returns `invalid_state` with `reason: attached_browser_inspector`. Opening or
+redocking an attached inspector while emulation is active resets the viewport to
+native sizing before WebKit takes ownership of the split geometry.
 
 Hook subcommands:
 
@@ -289,7 +429,9 @@ Hook subcommands:
 | `hooks claude <event>` | Handle Claude Code hook events. `claude-hook <event>` remains as the main-compatibility alias. |
 | `hooks codex <event>` | Handle Codex hook events. `codex install-hooks` remains as the main-compatibility installer alias. |
 | `hooks feed --source <agent>` | Convert agent hook events into Feed context. |
-| `hooks <agent> <event>` | Generic hook surface for `grok`, `opencode`, `pi`, `amp`, `cursor`, `gemini`, `rovodev`, `copilot`, `codebuddy`, `factory`, and `qoder`. |
+| `hooks <agent> <event>` | Generic hook surface for `grok`, `opencode`, `pi`, `amp`, `cursor`, `gemini`, `kimi`, `rovodev`, `copilot`, `codebuddy`, `factory`, and `qoder`. |
+
+Kimi hook setup targets the config file `kimi doctor` reports. Without a reported path, it takes the first of `${KIMI_CODE_HOME:-~/.kimi-code}/config.toml` (Kimi Code CLI) and `${KIMI_SHARE_DIR:-~/.kimi}/config.toml` (Kimi CLI 1.49 and earlier) that already exists as a file, then the first whose directory exists, and the Kimi Code CLI path when neither directory exists. Setup refreshes, but never removes, a cmux marker block already present in the other location; `hooks kimi uninstall` removes the block from both.
 
 Right sidebar commands:
 
@@ -297,12 +439,21 @@ Right sidebar commands:
 | --- | --- |
 | `right-sidebar toggle`, `right-sidebar show`, `right-sidebar hide` | Change right-sidebar visibility without printing on success. |
 | `right-sidebar focus` | Focus the current right-sidebar mode. |
-| `right-sidebar set <files\|find\|vault\|sessions\|feed\|dock>` | Show the right sidebar, switch mode, and focus it unless `--no-focus` is passed. |
-| `right-sidebar files`, `right-sidebar find`, `right-sidebar vault`, `right-sidebar sessions`, `right-sidebar feed`, `right-sidebar dock` | Short aliases for `right-sidebar set <mode>` with focus. |
+| `right-sidebar set <files\|find\|vault\|sessions\|feed\|dock\|cloud>` | Show the right sidebar, switch mode, and focus it unless `--no-focus` is passed. |
+| `right-sidebar files`, `right-sidebar find`, `right-sidebar vault`, `right-sidebar sessions`, `right-sidebar feed`, `right-sidebar dock`, `right-sidebar cloud` | Short aliases for `right-sidebar set <mode>` with focus. `cloud` (aliases `machines`, `vms`) is the Cloud machines panel; `mode` reports it as `machines`. |
 | `right-sidebar mode` | Print JSON with `visible` and `mode`. |
 | `--workspace <id\|ref\|index>` | Target the window containing a workspace. Refs and indexes resolve before the V1 socket command is sent. |
 | `--window <id\|ref\|index>` | Target a window. Refs and indexes resolve before the V1 socket command is sent. |
 | `--no-focus` | Only valid with `set`; switches mode without moving focus. |
+
+Custom sidebar commands:
+
+| Command | Contract |
+| --- | --- |
+| `sidebar validate [name]` | Validate all custom sidebars, or one named sidebar, under `~/.config/cmux/sidebars`. |
+| `sidebar reload [name]` | Validate all custom sidebars, then request a reload for every valid one. |
+| `sidebar select <name>` | Validate and activate one custom sidebar in the sidebar picker. |
+| `sidebar open <name>` | Validate and open one custom sidebar as a normal Bonsplit pane tab, preferring the right-side split from the focused surface. |
 
 Docs topics:
 
@@ -372,6 +523,57 @@ surface selection, focus, creation, or closure. The stream is bounded: cmux keep
 slow subscribers after 1,024 pending events, and rotates `events.jsonl` with one
 16 MiB archive at `events.jsonl.1`.
 
+## Workspace todos
+
+Each workspace carries a persisted checklist plus a todo lifecycle status,
+shared by the sidebar row, the checklist popover, the todo pane, `cmux todo`
+/ `cmux workspace status`, and the `workspace.todo.*` / `workspace.status.*`
+socket verbs (all funnel through the same mutation entry points).
+
+Agent policy: the checklist and manual status pins belong to the user.
+Coding agents must not create, edit, complete, remove, or replace checklist
+items, and must not `set`/`cycle` the status, unless the user explicitly
+asks them to manage that surface — a request to manage checklist items or
+a request to manage manual status pins. The status lane already tracks
+agent activity automatically through inference; agents should keep their
+own plans in their internal task tracking.
+
+Item schema (wire and `todo list --json` shape):
+
+| Field | Contract |
+| --- | --- |
+| `id` | Stable item UUID, assigned at creation and preserved across edits. |
+| `text` | Trimmed, non-empty, capped at 500 characters. |
+| `state` | `pending`, `in-progress`, or `completed`. |
+| `origin` | `user` or `agent`; who created the item. |
+
+Caps and ordering: at most 50 items per workspace. Storage order is the
+creation/`set` order and is what `todo list` prints and the wire returns;
+the sidebar/popover/pane rendering that floats unchecked items above
+completed ones is display-only and never reorders storage.
+
+`cmux todo set` atomically replaces the whole checklist from a JSON array of
+`{text, state?, id?, origin?}` objects (inline argument, or piped on stdin;
+also accepts `{"items": [...]}`). Items whose `id` matches an existing item
+keep that identity and its origin (state updates when given, else stays);
+other items are created (`origin` defaults to `user`, `state` to `pending`);
+existing items not named are removed. The whole replace is rejected — nothing
+mutated — if any text is empty after trimming or the array exceeds 50 items.
+The reply is the full resulting list payload. `cmux todo open` (socket:
+`workspace.todo.open`) opens or focuses the workspace's todo pane, so a
+script can drive the pane as a generic list surface:
+
+```bash
+# Mirror a build script's step list into the workspace todo pane.
+./plan-steps.sh --json |            # emits [{"text":"lint","state":"completed"}, ...]
+  cmux todo set
+cmux todo open
+```
+
+Re-running `cmux todo set` with the same `id`s updates text/state in place
+(checkbox identity is stable), so a watcher loop can re-emit the full list on
+every tick without churning item identities.
+
 ## No-Socket Help Probes
 
 The following probes are executable contract checks. They must exit 0 and print
@@ -380,16 +582,21 @@ the expected text without connecting to a cmux socket.
 <!-- cli-contract-help-probes:start -->
 - `cmux --help` -> `cmux - control cmux via Unix socket`
 - `cmux --help` -> `open <path-or-url>...`
+- `cmux --help` -> `sessions [list] [options]`
 - `cmux help` -> `cmux - control cmux via Unix socket`
+- `cmux sessions --help` -> `Usage: cmux sessions list [options]`
 - `cmux ping --help` -> `Usage: cmux ping`
 - `cmux capabilities --help` -> `Usage: cmux capabilities`
 - `cmux events --help` -> `Usage: cmux events [options]`
 - `cmux auth --help` -> `Usage: cmux auth <status|login|logout>`
-- `cmux vm --help` -> `Usage: cmux vm <new|ls|rm|exec|shell|attach|ssh|ssh-info> [args...]`
-- `cmux cloud --help` -> `Usage: cmux cloud <new|ls|rm|exec|shell|attach|ssh|ssh-info> [args...]`
+- `cmux vm --help` -> `Usage: cmux vm <base|new|ls|tree|status|stats|rename|snapshot|fork|restore|rm|run|route|agent|prompt|exec|push|pull|wait|shell|tui|desktop|open|ports|tools|handoff|promote-template|attach|ssh|ssh-info> [args...]`
+- `cmux cloud --help` -> `Usage: cmux cloud <base|new|ls|tree|status|stats|rename|snapshot|fork|restore|rm|run|route|agent|prompt|exec|push|pull|wait|shell|tui|desktop|open|ports|tools|handoff|promote-template|attach|ssh|ssh-info> [args...]`
+- `cmux remotes --help` -> `Usage: cmux remotes <list|add|remove> [options]`
+- `cmux remote --help` -> `Usage: cmux remotes <list|add|remove> [options]`
 - `cmux rpc --help` -> `Usage: cmux rpc <method> [json-params]`
+- `cmux comments --help` -> `Usage: cmux comments <subcommand> [options]`
 - `cmux help --help` -> `Usage: cmux help`
-- `cmux docs --help` -> `Usage: cmux docs [settings|shortcuts|api|browser|agents|dock]`
+- `cmux docs --help` -> `Usage: cmux docs [settings|shortcuts|api|browser|agents|dock|managed-policies]`
 - `cmux docs` -> `Topics:`
 - `cmux docs settings` -> `Config files:`
 - `cmux docs dock` -> `dock: Custom right-sidebar terminal controls`
@@ -407,6 +614,7 @@ the expected text without connecting to a cmux socket.
 - `cmux enable-browser --help` -> `Usage: cmux enable-browser [--json]`
 - `cmux browser-status --help` -> `Usage: cmux browser-status [--json]`
 - `cmux agent-hibernation --help` -> `Usage: cmux agent-hibernation <on|off> [--json]`
+- `cmux restore --help` -> `Usage: cmux restore [--surface <id|ref>] <kind> <checkpoint-id>`
 - `cmux restore-session --help` -> `Usage: cmux restore-session`
 - `cmux open --help` -> `Usage: cmux open <path-or-url>...`
 - `cmux feedback --help` -> `Usage: cmux feedback`
@@ -437,6 +645,11 @@ the expected text without connecting to a cmux socket.
 - `cmux list-workspaces --help` -> `Usage: cmux list-workspaces`
 - `cmux ssh --help` -> `Usage: cmux ssh <destination>`
 - `cmux ssh --help` -> `--forward-agent`
+- `cmux ssh --help` -> `--transport <ssh|mosh>`
+- `cmux mosh --help` -> `Usage: cmux mosh <destination>`
+- `cmux mosh-tmux --help` -> `Usage: cmux mosh-tmux <destination>`
+- `cmux mosh-tmux --help` -> `--session <name>`
+- `cmux ssh --help` -> `--command <text>`
 - `cmux ssh-session-list --help` -> `Usage: cmux ssh-session-list`
 - `cmux ssh-session-attach --help` -> `Usage: cmux ssh-session-attach --session-id <id>`
 - `cmux ssh-session-cleanup --help` -> `Usage: cmux ssh-session-cleanup`
@@ -521,6 +734,8 @@ the expected text without connecting to a cmux socket.
 - `cmux is-webview-focused --help` -> `Legacy alias for 'cmux browser is-webview-focused'`
 - `cmux markdown --help` -> `Usage: cmux markdown open <path>`
 <!-- cli-contract-help-probes:end -->
+
+For `cmux restore`, `--surface [id|ref]` uses the caller when omitted.
 
 ## No-Socket Negative Help Probes
 

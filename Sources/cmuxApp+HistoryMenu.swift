@@ -1,4 +1,5 @@
 import AppKit
+import CmuxWorkspaces
 import SwiftUI
 
 extension cmuxApp {
@@ -27,6 +28,12 @@ extension cmuxApp {
             )
 
             Divider()
+
+            splitCommandButton(title: String(localized: "menu.history.reopenClosedWorkspace", defaultValue: "Reopen Closed Workspace"), shortcut: menuShortcut(for: .reopenClosedWorkspace)) {
+                if AppDelegate.shared?.reopenMostRecentlyClosedWorkspace(preferredTabManager: historyTabManager) != true {
+                    NSSound.beep()
+                }
+            }
 
             splitCommandButton(title: String(localized: "menu.history.reopenLastClosed", defaultValue: "Reopen Last Closed"), shortcut: menuShortcut(for: .reopenClosedBrowserPanel)) {
                 if AppDelegate.shared?.reopenMostRecentlyClosedItem(preferredTabManager: historyTabManager) != true {
@@ -128,7 +135,7 @@ extension cmuxApp {
         let _ = focusHistoryMenuInvalidator.revision
         let back = manager.focusHistoryMenuSnapshot(direction: .back)
         let forward = manager.focusHistoryMenuSnapshot(direction: .forward)
-        return FocusHistoryMenuSnapshotBuilder.recentlyFocused(
+        return FocusHistoryMenuSnapshot.recentlyFocused(
             back: back,
             forward: forward,
             maxItemCount: 10

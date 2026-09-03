@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // runTmuxCompat handles `cmux __tmux-compat <args...>`, translating tmux
@@ -1132,24 +1135,33 @@ type tmuxSplitAnchor struct {
 	direction       string
 }
 
-func tmuxAnchoredSplitTarget(rc *rpcContext, workspaceId string) *tmuxSplitAnchor {
-	store := loadTmuxCompatStore()
+func tmuxAnchoredSplitTarget(rc *rpcContext, workspaceId string) (*tmuxSplitAnchor, error) {
+	store, err := loadTmuxCompatStore()
+	if err != nil {
+		return nil, err
+	}
 	if mvState, ok := store.MainVerticalLayouts[workspaceId]; ok && mvState.LastColumnSurfaceId != "" {
-		lastColumnId, err := tmuxCanonicalSurfaceId(rc, mvState.LastColumnSurfaceId, workspaceId)
+		staleLastColumn := mvState.LastColumnSurfaceId
+		lastColumnId, err := tmuxCanonicalSurfaceId(rc, staleLastColumn, workspaceId)
 		if err == nil {
 			return &tmuxSplitAnchor{
 				targetSurfaceId: lastColumnId,
 				callerSurfaceId: "",
 				direction:       "down",
-			}
+			}, nil
 		}
 
 		// Right-column anchors can outlive the pane they pointed at.
 		// Drop stale state and rebuild from the caller surface instead.
-		mvState.LastColumnSurfaceId = ""
-		store.MainVerticalLayouts[workspaceId] = mvState
-		delete(store.LastSplitSurface, workspaceId)
-		_ = saveTmuxCompatStore(store)
+		_ = withLockedTmuxCompatStore(func(store *tmuxCompatStore) error {
+			if current, ok := store.MainVerticalLayouts[workspaceId]; ok &&
+				current.LastColumnSurfaceId == staleLastColumn {
+				current.LastColumnSurfaceId = ""
+				store.MainVerticalLayouts[workspaceId] = current
+				delete(store.LastSplitSurface, workspaceId)
+			}
+			return nil
+		})
 	}
 
 	candidateAnchors := []string{tmuxCallerSurfaceHandle()}
@@ -1166,16 +1178,23 @@ func tmuxAnchoredSplitTarget(rc *rpcContext, workspaceId string) *tmuxSplitAncho
 				targetSurfaceId: anchorSurfaceId,
 				callerSurfaceId: anchorSurfaceId,
 				direction:       "right",
-			}
+			}, nil
 		}
 	}
 
-	if _, ok := store.MainVerticalLayouts[workspaceId]; ok {
-		delete(store.MainVerticalLayouts, workspaceId)
-		delete(store.LastSplitSurface, workspaceId)
-		_ = saveTmuxCompatStore(store)
+	observedLayout, hasObservedLayout := store.MainVerticalLayouts[workspaceId]
+	if hasObservedLayout {
+		_ = withLockedTmuxCompatStore(func(store *tmuxCompatStore) error {
+			if current, ok := store.MainVerticalLayouts[workspaceId]; ok &&
+				current.MainSurfaceId == observedLayout.MainSurfaceId &&
+				current.LastColumnSurfaceId == observedLayout.LastColumnSurfaceId {
+				delete(store.MainVerticalLayouts, workspaceId)
+				delete(store.LastSplitSurface, workspaceId)
+			}
+			return nil
+		})
 	}
-	return nil
+	return nil, nil
 }
 
 // --- TmuxCompatStore (local JSON state) ---
@@ -1197,24 +1216,104 @@ func tmuxCompatStoreURL() string {
 	return filepath.Join(home, ".cmuxterm", "tmux-compat-store.json")
 }
 
-func loadTmuxCompatStore() tmuxCompatStore {
-	data, err := os.ReadFile(tmuxCompatStoreURL())
-	if err != nil {
-		return tmuxCompatStore{
-			Buffers:             make(map[string]string),
-			Hooks:               make(map[string]string),
-			MainVerticalLayouts: make(map[string]mainVerticalState),
-			LastSplitSurface:    make(map[string]string),
+type tmuxCompatStoreDirectory struct {
+	file      *os.File
+	storeName string
+	lockName  string
+}
+
+func openTmuxCompatStoreDirectory(createIfMissing bool) (*tmuxCompatStoreDirectory, error) {
+	directory := filepath.Dir(tmuxCompatStoreURL())
+	if createIfMissing {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			return nil, err
 		}
+	}
+	fd, err := unix.Open(
+		directory,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	directoryFile := os.NewFile(uintptr(fd), directory)
+	if err := unix.Fchmod(fd, 0700); err != nil {
+		_ = directoryFile.Close()
+		return nil, err
+	}
+	return &tmuxCompatStoreDirectory{
+		file:      directoryFile,
+		storeName: filepath.Base(tmuxCompatStoreURL()),
+		lockName:  filepath.Base(tmuxCompatStoreURL()) + ".lock",
+	}, nil
+}
+
+func (directory *tmuxCompatStoreDirectory) open(name string, flags int, mode uint32) (*os.File, error) {
+	fd, err := unix.Openat(int(directory.file.Fd()), name, flags, mode)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+func (directory *tmuxCompatStoreDirectory) rename(source string, destination string) error {
+	return unix.Renameat(int(directory.file.Fd()), source, int(directory.file.Fd()), destination)
+}
+
+func (directory *tmuxCompatStoreDirectory) unlink(name string) {
+	_ = unix.Unlinkat(int(directory.file.Fd()), name, 0)
+}
+
+func emptyTmuxCompatStore() tmuxCompatStore {
+	return tmuxCompatStore{
+		Buffers:             make(map[string]string),
+		Hooks:               make(map[string]string),
+		MainVerticalLayouts: make(map[string]mainVerticalState),
+		LastSplitSurface:    make(map[string]string),
+	}
+}
+
+func loadTmuxCompatStore() (tmuxCompatStore, error) {
+	directory, err := openTmuxCompatStoreDirectory(false)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return emptyTmuxCompatStore(), nil
+		}
+		return tmuxCompatStore{}, err
+	}
+	defer directory.file.Close()
+	return loadTmuxCompatStoreFromDirectory(directory)
+}
+
+func loadTmuxCompatStoreFromDirectory(directory *tmuxCompatStoreDirectory) (tmuxCompatStore, error) {
+	file, err := directory.open(directory.storeName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return emptyTmuxCompatStore(), nil
+		}
+		return tmuxCompatStore{}, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return tmuxCompatStore{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return tmuxCompatStore{}, fmt.Errorf("tmux compatibility store is not a regular file")
+	}
+	// Heal stores created by older versions even when this is a read-only
+	// command, so buffer contents are never left world-readable.
+	if err := unix.Fchmod(int(file.Fd()), 0600); err != nil {
+		return tmuxCompatStore{}, err
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return tmuxCompatStore{}, err
 	}
 	var store tmuxCompatStore
 	if err := json.Unmarshal(data, &store); err != nil {
-		return tmuxCompatStore{
-			Buffers:             make(map[string]string),
-			Hooks:               make(map[string]string),
-			MainVerticalLayouts: make(map[string]mainVerticalState),
-			LastSplitSurface:    make(map[string]string),
-		}
+		return tmuxCompatStore{}, err
 	}
 	if store.Buffers == nil {
 		store.Buffers = make(map[string]string)
@@ -1228,60 +1327,141 @@ func loadTmuxCompatStore() tmuxCompatStore {
 	if store.LastSplitSurface == nil {
 		store.LastSplitSurface = make(map[string]string)
 	}
-	return store
+	return store, nil
 }
 
 func saveTmuxCompatStore(store tmuxCompatStore) error {
-	path := tmuxCompatStoreURL()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	return withLockedTmuxCompatStore(func(current *tmuxCompatStore) error {
+		*current = store
+		return nil
+	})
+}
+
+// withLockedTmuxCompatStore serializes a complete store read-modify-write
+// across independent cmuxd processes. The lock file is separate from the JSON
+// path because writers replace the JSON atomically.
+func withLockedTmuxCompatStore(mutate func(*tmuxCompatStore) error) error {
+	return withLockedTmuxCompatStoreIfChanged(func(store *tmuxCompatStore) (bool, error) {
+		if err := mutate(store); err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+}
+
+func withLockedTmuxCompatStoreIfChanged(mutate func(*tmuxCompatStore) (bool, error)) error {
+	directory, err := openTmuxCompatStoreDirectory(true)
+	if err != nil {
 		return err
 	}
+	defer directory.file.Close()
+	lockFile, err := directory.open(
+		directory.lockName,
+		unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0600,
+	)
+	if err != nil {
+		return err
+	}
+	defer lockFile.Close()
+	if err := unix.Fchmod(int(lockFile.Fd()), 0600); err != nil {
+		return err
+	}
+	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX); err != nil {
+		return err
+	}
+	defer unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+
+	store, err := loadTmuxCompatStoreFromDirectory(directory)
+	if err != nil {
+		return err
+	}
+	changed, err := mutate(&store)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	return saveTmuxCompatStoreUnlocked(directory, store)
+}
+
+func saveTmuxCompatStoreUnlocked(directory *tmuxCompatStoreDirectory, store tmuxCompatStore) error {
 	data, err := json.Marshal(store)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	tmpName := fmt.Sprintf(".tmux-compat-store-%d-%d.tmp", os.Getpid(), time.Now().UnixNano())
+	tmp, err := directory.open(
+		tmpName,
+		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0600,
+	)
+	if err != nil {
+		return err
+	}
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			directory.unlink(tmpName)
+		}
+	}()
+	if err := unix.Fchmod(int(tmp.Fd()), 0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := directory.rename(tmpName, directory.storeName); err != nil {
+		return err
+	}
+	removeTemp = false
+	return nil
 }
 
 func tmuxPruneCompatWorkspaceState(workspaceId string) error {
-	store := loadTmuxCompatStore()
-	changed := false
-	if _, ok := store.MainVerticalLayouts[workspaceId]; ok {
-		delete(store.MainVerticalLayouts, workspaceId)
-		changed = true
-	}
-	if _, ok := store.LastSplitSurface[workspaceId]; ok {
-		delete(store.LastSplitSurface, workspaceId)
-		changed = true
-	}
-	if changed {
-		return saveTmuxCompatStore(store)
-	}
-	return nil
+	return withLockedTmuxCompatStoreIfChanged(func(store *tmuxCompatStore) (bool, error) {
+		_, removedLayout := store.MainVerticalLayouts[workspaceId]
+		_, removedSplit := store.LastSplitSurface[workspaceId]
+		if removedLayout {
+			delete(store.MainVerticalLayouts, workspaceId)
+		}
+		if removedSplit {
+			delete(store.LastSplitSurface, workspaceId)
+		}
+		return removedLayout || removedSplit, nil
+	})
 }
 
 func tmuxPruneCompatSurfaceState(workspaceId string, surfaceId string) error {
-	store := loadTmuxCompatStore()
-	changed := false
-	if lastSplit := store.LastSplitSurface[workspaceId]; lastSplit == surfaceId {
-		delete(store.LastSplitSurface, workspaceId)
-		changed = true
-	}
-	if layout, ok := store.MainVerticalLayouts[workspaceId]; ok {
-		if layout.MainSurfaceId == surfaceId {
-			delete(store.MainVerticalLayouts, workspaceId)
+	return withLockedTmuxCompatStoreIfChanged(func(store *tmuxCompatStore) (bool, error) {
+		changed := false
+		if lastSplit := store.LastSplitSurface[workspaceId]; lastSplit == surfaceId {
 			delete(store.LastSplitSurface, workspaceId)
 			changed = true
-		} else if layout.LastColumnSurfaceId == surfaceId {
-			layout.LastColumnSurfaceId = ""
-			store.MainVerticalLayouts[workspaceId] = layout
-			changed = true
 		}
-	}
-	if changed {
-		return saveTmuxCompatStore(store)
-	}
-	return nil
+		if layout, ok := store.MainVerticalLayouts[workspaceId]; ok {
+			if layout.MainSurfaceId == surfaceId {
+				delete(store.MainVerticalLayouts, workspaceId)
+				delete(store.LastSplitSurface, workspaceId)
+				changed = true
+			} else if layout.LastColumnSurfaceId == surfaceId {
+				layout.LastColumnSurfaceId = ""
+				store.MainVerticalLayouts[workspaceId] = layout
+				changed = true
+			}
+		}
+		return changed, nil
+	})
 }
 
 // --- Special key translation ---
@@ -1389,6 +1569,8 @@ func dispatchTmuxCommand(rc *rpcContext, command string, args []string) error {
 		return tmuxKillWindow(rc, args)
 	case "kill-pane", "killp":
 		return tmuxKillPane(rc, args)
+	case "respawn-pane", "respawnp":
+		return tmuxRespawnPane(rc, args)
 	case "send-keys", "send":
 		return tmuxSendKeys(rc, args)
 	case "capture-pane", "capturep":
@@ -1524,13 +1706,26 @@ func tmuxSplitWindow(rc *rpcContext, args []string) error {
 	anchoredCallerSurface := ""
 	if callerWorkspace != "" {
 		if wsId, err := tmuxResolveWorkspaceId(rc, callerWorkspace); err == nil {
-			if anchored := tmuxAnchoredSplitTarget(rc, wsId); anchored != nil {
+			anchored, err := tmuxAnchoredSplitTarget(rc, wsId)
+			if err != nil {
+				return err
+			}
+			if anchored != nil {
 				targetWs = wsId
 				targetSurface = anchored.targetSurfaceId
 				direction = anchored.direction
 				anchoredCallerSurface = anchored.callerSurfaceId
 			}
 		}
+	}
+
+	// Validate the store before creating a pane. A malformed or unreadable
+	// store must not turn a successful surface.split into a reported failure
+	// after the pane has already been created.
+	if err := withLockedTmuxCompatStoreIfChanged(func(*tmuxCompatStore) (bool, error) {
+		return false, nil
+	}); err != nil {
+		return fmt.Errorf("validate tmux compatibility store: %w", err)
 	}
 
 	focusNewPane := !p.hasFlag("-d")
@@ -1550,19 +1745,28 @@ func tmuxSplitWindow(rc *rpcContext, args []string) error {
 	newPaneId, _ := created["pane_id"].(string)
 
 	// Track for main-vertical layout
-	store := loadTmuxCompatStore()
-	store.LastSplitSurface[targetWs] = surfaceId
-	if _, ok := store.MainVerticalLayouts[targetWs]; ok {
-		mvs := store.MainVerticalLayouts[targetWs]
-		mvs.LastColumnSurfaceId = surfaceId
-		store.MainVerticalLayouts[targetWs] = mvs
-	} else if direction == "right" && anchoredCallerSurface != "" {
-		store.MainVerticalLayouts[targetWs] = mainVerticalState{
-			MainSurfaceId:       anchoredCallerSurface,
-			LastColumnSurfaceId: surfaceId,
+	if err := withLockedTmuxCompatStore(func(store *tmuxCompatStore) error {
+		store.LastSplitSurface[targetWs] = surfaceId
+		if _, ok := store.MainVerticalLayouts[targetWs]; ok {
+			mvs := store.MainVerticalLayouts[targetWs]
+			mvs.LastColumnSurfaceId = surfaceId
+			store.MainVerticalLayouts[targetWs] = mvs
+		} else if direction == "right" && anchoredCallerSurface != "" {
+			store.MainVerticalLayouts[targetWs] = mainVerticalState{
+				MainSurfaceId:       anchoredCallerSurface,
+				LastColumnSurfaceId: surfaceId,
+			}
 		}
+		return nil
+	}); err != nil {
+		if _, rollbackErr := rc.call("surface.close", map[string]any{
+			"workspace_id": targetWs,
+			"surface_id":   surfaceId,
+		}); rollbackErr != nil {
+			return fmt.Errorf("persist tmux compatibility layout: %w (rollback failed: %v)", err, rollbackErr)
+		}
+		return fmt.Errorf("persist tmux compatibility layout: %w", err)
 	}
-	saveTmuxCompatStore(store)
 
 	// Equalize vertical splits
 	rc.call("workspace.equalize_splits", map[string]any{
@@ -1647,6 +1851,124 @@ func tmuxKillPane(rc *rpcContext, args []string) error {
 	return nil
 }
 
+// tmuxRespawnPane mirrors the Swift __tmux-compat respawn-pane handler
+// (CLI/cmux.swift), which Claude Code agent teams use to start teammate
+// panes. Both paths dispatch to the same surface.respawn socket method.
+func tmuxRespawnPane(rc *rpcContext, args []string) error {
+	p := parseTmuxArgs(args, []string{"-c", "-t"}, []string{"-k"})
+	if !p.hasFlag("-k") {
+		return fmt.Errorf("respawn-pane requires -k in cmux tmux compatibility mode")
+	}
+	wsId, _, surfId, err := tmuxResolveSurfaceTarget(rc, p.value("-t"))
+	if err != nil {
+		return err
+	}
+	commandText := strings.TrimSpace(strings.Join(p.positional, " "))
+	if commandText == "" {
+		commandText, err = tmuxStoredStartCommand(rc, wsId, surfId)
+		if err != nil {
+			return err
+		}
+	}
+	if commandText == "" {
+		commandText = "exec ${SHELL:-/bin/sh} -l"
+	}
+	params := map[string]any{
+		"workspace_id": wsId,
+		"surface_id":   surfId,
+		"command":      tmuxRespawnStartCommand(commandText, tmuxClaudeTeamsRespawnEnvironment()),
+		// Kept raw (unwrapped) for display and session persistence, matching
+		// the Swift path.
+		"tmux_start_command": commandText,
+	}
+	if cwd := strings.TrimSpace(p.value("-c")); cwd != "" {
+		if resolved := tmuxNormalizePath(cwd); resolved != "" {
+			params["working_directory"] = resolved
+		}
+	}
+	_, err = rc.call("surface.respawn", params)
+	return err
+}
+
+// tmuxStoredStartCommand returns the surface's recorded start command, used
+// when respawn-pane is called without an explicit command (tmux semantics:
+// reuse the command the pane was started with). A lookup failure is
+// propagated rather than treated as "no stored command", so a transient
+// RPC error cannot silently replace the pane's intended command with the
+// login-shell fallback (matching the Swift path, where the lookup throws).
+func tmuxStoredStartCommand(rc *rpcContext, workspaceId, surfaceId string) (string, error) {
+	payload, err := rc.call("surface.list", map[string]any{"workspace_id": workspaceId})
+	if err != nil {
+		return "", err
+	}
+	surfaces, _ := payload["surfaces"].([]any)
+	for _, s := range surfaces {
+		surface, _ := s.(map[string]any)
+		if surface == nil || stringFromAnyGo(surface["id"]) != surfaceId {
+			continue
+		}
+		for _, key := range []string{"tmux_start_command", "pane_start_command", "initial_command"} {
+			if v := stringFromAnyGo(surface[key]); v != "" {
+				return v, nil
+			}
+		}
+		return "", nil
+	}
+	return "", nil
+}
+
+// tmuxShellInvokedStartCommand wraps a tmux shell-command in `/bin/sh -c`
+// so the surface can exec it. Ghostty execs the pane start command as a
+// single executable, but tmux shell-commands are arbitrary shell
+// expressions (Claude Code teammates respawn with `cd <dir> && env …`),
+// so a bare exec of `cd` fails and the pane dies before the real command
+// runs. Mirrors the Swift tmuxShellInvokedStartCommand.
+func tmuxShellInvokedStartCommand(command string) string {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return command
+	}
+	return "/bin/sh -c " + tmuxShellQuote(trimmed)
+}
+
+type tmuxEnvPair struct {
+	key   string
+	value string
+}
+
+// tmuxRespawnStartCommand is tmuxShellInvokedStartCommand with prependEnv
+// exported inside the wrapping shell, so the respawned process inherits
+// those variables. With an empty prependEnv it is byte-for-byte identical
+// to tmuxShellInvokedStartCommand. Mirrors the Swift tmuxRespawnStartCommand.
+func tmuxRespawnStartCommand(command string, prependEnv []tmuxEnvPair) string {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return command
+	}
+	if len(prependEnv) == 0 {
+		return tmuxShellInvokedStartCommand(trimmed)
+	}
+	exports := make([]string, len(prependEnv))
+	for i, kv := range prependEnv {
+		exports[i] = "export " + kv.key + "=" + tmuxShellQuote(kv.value)
+	}
+	return tmuxShellInvokedStartCommand(strings.Join(exports, "; ") + "; " + trimmed)
+}
+
+// tmuxClaudeTeamsRespawnEnvironment re-supplies the environment a
+// claude-teams teammate pane must start with. CLAUDE_CODE_SANDBOXED
+// short-circuits Claude Code's interactive trust prompt, which a teammate
+// pane can never answer. It is only set when the claude-teams launcher
+// recorded the user's explicit opt-in (CMUX_CLAUDE_TEAMS_SANDBOXED=1),
+// propagated to this process by the tmux shim. Mirrors the Swift
+// tmuxClaudeTeamsRespawnEnvironment; see that for the full rationale.
+func tmuxClaudeTeamsRespawnEnvironment() []tmuxEnvPair {
+	if strings.TrimSpace(os.Getenv("CMUX_CLAUDE_TEAMS_SANDBOXED")) != "1" {
+		return nil
+	}
+	return []tmuxEnvPair{{key: "CLAUDE_CODE_SANDBOXED", value: "1"}}
+}
+
 func tmuxSendKeys(rc *rpcContext, args []string) error {
 	p := parseTmuxArgs(args, []string{"-t"}, []string{"-l"})
 	wsId, _, surfId, err := tmuxResolveSurfaceTarget(rc, p.value("-t"))
@@ -1688,9 +2010,12 @@ func tmuxCapturePane(rc *rpcContext, args []string) error {
 	if p.hasFlag("-p") {
 		fmt.Print(text)
 	} else {
-		store := loadTmuxCompatStore()
-		store.Buffers["default"] = text
-		saveTmuxCompatStore(store)
+		if err := withLockedTmuxCompatStore(func(store *tmuxCompatStore) error {
+			store.Buffers["default"] = text
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1850,66 +2175,127 @@ func tmuxResizePane(rc *rpcContext, args []string) error {
 	hasDirectional := p.hasFlag("-L") || p.hasFlag("-R") || p.hasFlag("-U") || p.hasFlag("-D")
 
 	if !hasDirectional {
-		if absWidthStr := p.value("-x"); absWidthStr != "" {
-			absWidth := parseInt(strings.ReplaceAll(absWidthStr, "%", ""))
-			// Get current width to compute delta
-			panePayload, err := rc.call("pane.list", map[string]any{"workspace_id": wsId})
-			if err != nil {
-				return err
-			}
-			panes, _ := panePayload["panes"].([]any)
-			for _, pp := range panes {
-				pane, _ := pp.(map[string]any)
-				if pane == nil {
-					continue
-				}
-				if pid, _ := pane["id"].(string); pid == paneId {
-					cellW := intFromAnyGo(pane["cell_width_px"])
-					currentCols := intFromAnyGo(pane["columns"])
-					if cellW > 0 && currentCols >= 0 {
-						delta := absWidth - currentCols
-						if delta != 0 {
-							dir := "right"
-							if delta < 0 {
-								dir = "left"
-								delta = -delta
-							}
-							rc.call("pane.resize", map[string]any{
-								"workspace_id": wsId,
-								"pane_id":      paneId,
-								"direction":    dir,
-								"amount":       delta * cellW,
-							})
-						}
-					}
-					break
-				}
-			}
+		targetSize := strings.TrimSpace(p.value("-x"))
+		// Deliberately preserve the daemon's historical height-only no-op: recurring
+		// OMX HUD probes share this shape, and this shim has no deterministic HUD
+		// identity signal. Applying -y here would overwrite the user's layout.
+		if targetSize == "" {
 			return nil
 		}
+		isPercentage := strings.HasSuffix(targetSize, "%")
+		target := parseInt(strings.TrimSuffix(targetSize, "%"))
+		if target <= 0 {
+			return fmt.Errorf("resize-pane size must be greater than zero")
+		}
+		panePayload, err := rc.call("pane.list", map[string]any{"workspace_id": wsId})
+		if err != nil {
+			return err
+		}
+		targetPoints := float64(0)
+		if isPercentage {
+			if frame, ok := panePayload["container_frame"].(map[string]any); ok {
+				targetPoints = floatFromAny(frame["width"]) * float64(target) / 100
+			}
+		}
+		panes, _ := panePayload["panes"].([]any)
+		for _, pp := range panes {
+			pane, _ := pp.(map[string]any)
+			if pane == nil {
+				continue
+			}
+			if pid, _ := pane["id"].(string); pid == paneId {
+				cellPoints := floatFromAny(pane["cell_width_points"])
+				if !isPercentage && targetPoints <= 0 && cellPoints > 0 {
+					columns := floatFromAny(pane["columns"])
+					frame, _ := pane["pixel_frame"].(map[string]any)
+					paneWidth := floatFromAny(frame["width"])
+					if columns > 0 && paneWidth > 0 {
+						residual := math.Max(0, paneWidth-columns*cellPoints)
+						targetPoints = float64(target)*cellPoints + residual
+					}
+				}
+				break
+			}
+		}
+		params := map[string]any{
+			"workspace_id":  wsId,
+			"pane_id":       paneId,
+			"absolute_axis": "horizontal",
+			"tmux_compat":   true,
+		}
+		if targetPoints > 0 {
+			params["target_pixels"] = targetPoints
+		}
+		if isPercentage {
+			params["target_percentage"] = target
+		} else {
+			params["target_cells"] = target
+		}
+		_, err = rc.call("pane.resize", params)
+		return err
 	}
 
 	if hasDirectional {
 		dir := "right"
+		directionFlag := "-R"
 		if p.hasFlag("-L") {
 			dir = "left"
+			directionFlag = "-L"
 		} else if p.hasFlag("-U") {
 			dir = "up"
+			directionFlag = "-U"
 		} else if p.hasFlag("-D") {
 			dir = "down"
+			directionFlag = "-D"
 		}
-		rawAmount := firstNonEmpty(p.value("-x"), p.value("-y"), "5")
+		rawAmount := "1"
+		if len(p.positional) > 0 {
+			rawAmount = p.positional[0]
+			if strings.HasPrefix(rawAmount, directionFlag) && len(rawAmount) > len(directionFlag) {
+				rawAmount = strings.TrimPrefix(rawAmount, directionFlag)
+			}
+		} else {
+			rawAmount = firstNonEmpty(p.value("-x"), p.value("-y"), "1")
+		}
 		rawAmount = strings.ReplaceAll(rawAmount, "%", "")
 		amount := parseInt(rawAmount)
 		if amount <= 0 {
-			amount = 5
+			amount = 1
 		}
-		_, err := rc.call("pane.resize", map[string]any{
+		amountPoints := 0
+		panePayload, err := rc.call("pane.list", map[string]any{"workspace_id": wsId})
+		if err != nil {
+			return err
+		}
+		panes, _ := panePayload["panes"].([]any)
+		for _, pp := range panes {
+			pane, _ := pp.(map[string]any)
+			if pane == nil {
+				continue
+			}
+			if pid, _ := pane["id"].(string); pid == paneId {
+				pointsKey := "cell_width_points"
+				if dir == "up" || dir == "down" {
+					pointsKey = "cell_height_points"
+				}
+				cellPoints := floatFromAny(pane[pointsKey])
+				if cellPoints > 0 {
+					amountPoints = max(1, int(math.Round(float64(amount)*cellPoints)))
+				}
+				break
+			}
+		}
+		params := map[string]any{
 			"workspace_id": wsId,
 			"pane_id":      paneId,
 			"direction":    dir,
-			"amount":       amount,
-		})
+			"amount_cells": amount,
+			"tmux_compat":  true,
+		}
+		if amountPoints > 0 {
+			params["amount"] = amountPoints
+		}
+		_, err = rc.call("pane.resize", params)
 		return err
 	}
 	return nil
@@ -2011,20 +2397,23 @@ func tmuxSelectLayout(rc *rpcContext, args []string) error {
 
 	if layoutName == "main-vertical" {
 		if callerSurface := tmuxCallerSurfaceHandle(); callerSurface != "" {
-			store := loadTmuxCompatStore()
-			existingColumn := ""
-			if existing, ok := store.MainVerticalLayouts[wsId]; ok {
-				existingColumn = existing.LastColumnSurfaceId
+			if err := withLockedTmuxCompatStore(func(store *tmuxCompatStore) error {
+				existingColumn := ""
+				if existing, ok := store.MainVerticalLayouts[wsId]; ok {
+					existingColumn = existing.LastColumnSurfaceId
+				}
+				seedColumn := existingColumn
+				if seedColumn == "" {
+					seedColumn = store.LastSplitSurface[wsId]
+				}
+				store.MainVerticalLayouts[wsId] = mainVerticalState{
+					MainSurfaceId:       callerSurface,
+					LastColumnSurfaceId: seedColumn,
+				}
+				return nil
+			}); err != nil {
+				return err
 			}
-			seedColumn := existingColumn
-			if seedColumn == "" {
-				seedColumn = store.LastSplitSurface[wsId]
-			}
-			store.MainVerticalLayouts[wsId] = mainVerticalState{
-				MainSurfaceId:       callerSurface,
-				LastColumnSurfaceId: seedColumn,
-			}
-			saveTmuxCompatStore(store)
 		}
 	} else if layoutName != "" {
 		_ = tmuxPruneCompatWorkspaceState(wsId)
@@ -2039,7 +2428,10 @@ func tmuxShowBuffer(args []string) error {
 	if name == "" {
 		name = "default"
 	}
-	store := loadTmuxCompatStore()
+	store, err := loadTmuxCompatStore()
+	if err != nil {
+		return err
+	}
 	if buf, ok := store.Buffers[name]; ok {
 		fmt.Print(buf)
 	}
@@ -2052,7 +2444,10 @@ func tmuxSaveBuffer(args []string) error {
 	if name == "" {
 		name = "default"
 	}
-	store := loadTmuxCompatStore()
+	store, err := loadTmuxCompatStore()
+	if err != nil {
+		return err
+	}
 	buf, ok := store.Buffers[name]
 	if !ok {
 		return fmt.Errorf("buffer not found: %s", name)

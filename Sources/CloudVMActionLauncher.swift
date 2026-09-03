@@ -1,3 +1,4 @@
+import CmuxFoundation
 import AppKit
 import Foundation
 
@@ -16,6 +17,7 @@ final class CloudVMActionLauncher {
     }
 
     private var processes: [Int32: Process] = [:]
+    private var authTransitionSuppressedProcessIDs: Set<Int32> = []
     private var isShuttingDown = false
 
     private init() {}
@@ -28,36 +30,73 @@ final class CloudVMActionLauncher {
         processes.removeAll()
     }
 
+    /// Cancel Cloud VM CLI children when the account is signing out without
+    /// putting the launcher into the permanent application-termination state.
+    /// Their late termination callbacks are suppressed so a failed CLI cannot
+    /// present an alert over the signed-out account screen.
+    func cancelAllForAuthTransition() {
+        for (processID, process) in processes where process.isRunning {
+            authTransitionSuppressedProcessIDs.insert(processID)
+            process.terminate()
+        }
+        processes.removeAll()
+    }
+
     @discardableResult
     func start(
         socketPath: String,
         preferredWindow: NSWindow?,
+        arguments: [String] = ["vm", "base", "open"],
+        successTitle: String? = nil,
+        presentOutputOnSuccess: Bool = false,
+        presentsFailureAlert: Bool = true,
+        environmentOverrides: [String: String] = [:],
         onCompletion: ((Completion) -> Void)? = nil
     ) -> Bool {
+        let accountFlow = AppDelegate.shared?.auth?.accountFlow
+        let authState = CloudVMPanelAuthState.resolve(
+            isAuthenticated: accountFlow?.isAuthenticated == true,
+            isWorkingOnAuth: accountFlow?.isWorkingOnAuth == true
+        )
+        if !authState.allowsAuthenticatedOperation {
+            // Keep every native launcher entrypoint aligned with the Machines
+            // panel: a signed-out action opens the shared sign-in screen and
+            // never starts a child CLI that could create or attach a VM.
+            _ = AppDelegate.shared?.performAccountSignInWorkspaceAction(
+                preferredWindow: preferredWindow,
+                debugSource: "cloudVM.auth"
+            )
+            return false
+        }
         let cliURL = Bundle.main.resourceURL?.appendingPathComponent("bin/cmux")
         guard let cliURL,
               FileManager.default.isExecutableFile(atPath: cliURL.path) else {
-            presentStartFailure(
-                summary: String(
-                    localized: "command.cloudVM.failed.missingCLI",
-                    defaultValue: "The bundled cmux CLI is missing from this app build."
-                ),
-                output: "",
-                action: String(
-                    localized: "command.cloudVM.failed.action.missingCLI",
-                    defaultValue: "Install or reload a fresh cmux build, then try Start Cloud VM again. You can also run `cmux vm new` in a terminal to see the full error."
-                ),
-                preferredWindow: preferredWindow
-            )
+            if presentsFailureAlert {
+                presentStartFailure(
+                    summary: String(
+                        localized: "command.cloudVM.failed.missingCLI",
+                        defaultValue: "The bundled cmux CLI is missing from this app build."
+                    ),
+                    output: "",
+                    action: String(
+                        localized: "command.cloudVM.failed.action.missingCLI",
+                        defaultValue: "Install or reload a fresh cmux build, then try Start Cloud VM again. You can also run `cmux vm base open` in a terminal to see the full error."
+                    ),
+                    preferredWindow: preferredWindow
+                )
+            }
             return false
         }
 
         let process = Process()
         process.executableURL = cliURL
-        process.arguments = ["--socket", socketPath, "--id-format", "uuids", "vm", "new"]
+        process.arguments = ["--socket", socketPath, "--id-format", "uuids"] + arguments
         var environment = ProcessInfo.processInfo.environment
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_BUNDLED_CLI_PATH"] = cliURL.path
+        for (key, value) in environmentOverrides {
+            environment[key] = value
+        }
         environment.removeValue(forKey: "CMUX_SOCKET")
         process.environment = environment
 
@@ -74,6 +113,7 @@ final class CloudVMActionLauncher {
             let terminationStatus = terminatedProcess.terminationStatus
             Task { @MainActor in
                 Self.shared.processes.removeValue(forKey: processIdentifier)
+                let suppressPresentation = Self.shared.authTransitionSuppressedProcessIDs.remove(processIdentifier) != nil
                 onCompletion?(
                     Completion(
                         terminationStatus: terminationStatus,
@@ -81,17 +121,27 @@ final class CloudVMActionLauncher {
                         workspaceId: Self.createdWorkspaceId(from: output)
                     )
                 )
-                guard terminationStatus != 0, !Self.shared.isShuttingDown else { return }
+                if terminationStatus == 0, presentOutputOnSuccess, !Self.shared.isShuttingDown, !suppressPresentation {
+                    Self.shared.presentCommandResult(
+                        title: successTitle ?? String(localized: "command.cloudVM.result.title", defaultValue: "Cloud VM"),
+                        output: output,
+                        preferredWindow: launchWindow
+                    )
+                }
+                guard terminationStatus != 0,
+                      !Self.shared.isShuttingDown,
+                      !suppressPresentation,
+                      presentsFailureAlert else { return }
                 let format = String(
                     localized: "command.cloudVM.failed.exit",
-                    defaultValue: "cmux vm new exited with status %d."
+                    defaultValue: "Cloud VM command exited with status %d."
                 )
                 Self.shared.presentStartFailure(
                     summary: String(format: format, Int(terminationStatus)),
                     output: output,
                     action: String(
                         localized: "command.cloudVM.failed.action.exit",
-                        defaultValue: "Open a terminal and run `cmux auth status`, `cmux vm ls`, then `cmux vm new`. If you hit the active VM limit, delete one with `cmux vm rm <id>` and retry."
+                        defaultValue: "Open a terminal and run `cmux auth status`, `cmux vm ls`, then `cmux vm base open`. If you hit the active VM limit, delete one with `cmux vm rm <id>` and retry."
                     ),
                     preferredWindow: launchWindow
                 )
@@ -107,19 +157,39 @@ final class CloudVMActionLauncher {
             return true
         } catch {
             outputCollector.cancel()
-            presentStartFailure(
-                summary: String(
-                    localized: "command.cloudVM.failed.launch",
-                    defaultValue: "cmux vm new could not be launched."
-                ),
-                output: error.localizedDescription,
-                action: String(
-                    localized: "command.cloudVM.failed.action.launch",
-                    defaultValue: "Reload cmux so the bundled CLI is available, then try again. If it still fails, run `cmux vm new` in a terminal and send us the output."
-                ),
-                preferredWindow: preferredWindow
-            )
+            if presentsFailureAlert {
+                presentStartFailure(
+                    summary: String(
+                        localized: "command.cloudVM.failed.launch",
+                        defaultValue: "cmux vm base open could not be launched."
+                    ),
+                    output: error.localizedDescription,
+                    action: String(
+                        localized: "command.cloudVM.failed.action.launch",
+                        defaultValue: "Reload cmux so the bundled CLI is available, then try again. If it still fails, run `cmux vm base open` in a terminal and send us the output."
+                    ),
+                    preferredWindow: preferredWindow
+                )
+            }
             return false
+        }
+    }
+
+    private func presentCommandResult(title: String, output: String, preferredWindow: NSWindow?) {
+        let trimmedOutput = String(output.trimmingCharacters(in: .whitespacesAndNewlines).prefix(4000))
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = title
+        alert.addButton(withTitle: String(localized: "common.ok", defaultValue: "OK"))
+        // House alert style: command output lives in the scrollable details
+        // region so long results never balloon the sheet.
+        let content = CmuxAlertContent.scrollingAll(trimmedOutput)
+        let window = preferredWindow ?? NSApp.keyWindow ?? NSApp.mainWindow
+        content.apply(to: alert, presentingWindow: window)
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            _ = alert.runModal()
         }
     }
 
@@ -139,10 +209,14 @@ final class CloudVMActionLauncher {
         let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
         let limitedOutput = String(trimmedOutput.prefix(2000))
         let safeOutput = sanitizedCloudVMStartOutput(limitedOutput)
+        // When the whole transcript is held back (it mentions backend internals),
+        // still tell the person *why* it failed: the CLI's first line is the
+        // human-readable reason ("Cloud VM state is unavailable (HTTP 503 …)").
+        let reason = safeOutput.isEmpty ? firstSafeLine(of: limitedOutput) : nil
         let whatToTry = String(localized: "command.cloudVM.failed.whatToTry", defaultValue: "What to try:")
         let details = String(localized: "command.cloudVM.failed.details", defaultValue: "Details:")
         var sections = [
-            summary,
+            reason.map { "\(summary)\n\($0)" } ?? summary,
             "\(whatToTry)\n\(action)",
         ]
         if !safeOutput.isEmpty {
@@ -153,16 +227,34 @@ final class CloudVMActionLauncher {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = String(localized: "command.cloudVM.failed.title", defaultValue: "Couldn't Start Cloud VM")
-        alert.informativeText = informativeText
         alert.addButton(withTitle: String(localized: "common.ok", defaultValue: "OK"))
-
-        if let preferredWindow {
-            alert.beginSheetModal(for: preferredWindow, completionHandler: nil)
-        } else if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+        // House alert style: summary and next steps stay fixed, raw output
+        // scrolls, and the sheet is attached to the window so it moves with it.
+        let content = safeOutput.isEmpty
+            ? CmuxAlertContent(informativeText: informativeText)
+            : CmuxAlertContent(flattenedText: informativeText, separatingScrollableDetails: safeOutput)
+        let window = preferredWindow ?? NSApp.keyWindow ?? NSApp.mainWindow
+        content.apply(to: alert, presentingWindow: window)
+        if let window {
             alert.beginSheetModal(for: window, completionHandler: nil)
         } else {
             _ = alert.runModal()
         }
+    }
+
+    /// The first line of CLI output that passes the same redaction as the full
+    /// transcript, with an "Error:" prefix dropped. Nil when no line is safe.
+    private func firstSafeLine(of output: String) -> String? {
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            var line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.lowercased().hasPrefix("error:") {
+                line = String(line.dropFirst("error:".count)).trimmingCharacters(in: .whitespaces)
+            }
+            guard !line.isEmpty else { continue }
+            let safe = sanitizedCloudVMStartOutput(line)
+            if !safe.isEmpty { return String(safe.prefix(240)) }
+        }
+        return nil
     }
 
     private func sanitizedCloudVMStartOutput(_ output: String) -> String {
@@ -183,6 +275,7 @@ final class CloudVMActionLauncher {
             "cookie",
             "credential",
             "database",
+            "daytona",
             "e2b",
             "freestyle",
             "http://",
@@ -214,6 +307,7 @@ final class CloudVMActionLauncher {
             "cookie",
             "credential",
             "database",
+            "daytona",
             "e2b",
             "freestyle",
             "itemid",
@@ -275,7 +369,7 @@ final class ProcessOutputCollector: @unchecked Sendable {
 
     func start() {
         stdoutHandle.readabilityHandler = { [weak self] handle in
-            switch ProcessPipeReader.readAvailableDataOrEndOfFile(from: handle) {
+            switch handle.readAvailableDataOrEndOfFile() {
             case .data(let data):
                 self?.append(data, to: .stdout)
             case .wouldBlock:
@@ -285,7 +379,7 @@ final class ProcessOutputCollector: @unchecked Sendable {
             }
         }
         stderrHandle.readabilityHandler = { [weak self] handle in
-            switch ProcessPipeReader.readAvailableDataOrEndOfFile(from: handle) {
+            switch handle.readAvailableDataOrEndOfFile() {
             case .data(let data):
                 self?.append(data, to: .stderr)
             case .wouldBlock:
@@ -309,8 +403,8 @@ final class ProcessOutputCollector: @unchecked Sendable {
 
         stdoutHandle.readabilityHandler = nil
         stderrHandle.readabilityHandler = nil
-        append(ProcessPipeReader.readDataToEndOfFileOrEmpty(from: stdoutHandle), to: .stdout)
-        append(ProcessPipeReader.readDataToEndOfFileOrEmpty(from: stderrHandle), to: .stderr)
+        append(stdoutHandle.readDataToEndOfFileOrEmpty(), to: .stdout)
+        append(stderrHandle.readDataToEndOfFileOrEmpty(), to: .stderr)
         try? stdoutHandle.close()
         try? stderrHandle.close()
 

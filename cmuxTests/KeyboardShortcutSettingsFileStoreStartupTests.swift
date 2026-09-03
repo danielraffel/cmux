@@ -1,5 +1,13 @@
 import XCTest
 import AppKit
+// Selective imports: the app target also defines AppIconMode/StoredShortcut/etc.,
+// so a blanket `import CmuxSettings` here makes those names ambiguous. Import only
+// the settings symbols this file needs.
+import struct CmuxSettings.AppCatalogSection
+import struct CmuxSettings.QuitConfirmationStore
+import enum CmuxSettings.ConfirmQuitMode
+import enum CmuxSettings.BrowserSearchEngine
+import struct CmuxSettings.BrowserSearchSettingsStore
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -15,6 +23,8 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
     override func setUp() {
         super.setUp()
         originalSettingsFileStore = KeyboardShortcutSettings.settingsFileStore
+        // The suite asserts the store never live-applies appearance, so the global observer's own reaction to the defaults writes the store legitimately makes must not be recorded.
+        AppearanceSettingsUserDefaultsObserver.shared.stopObserving()
         KeyboardShortcutSettings.resetAll()
     }
 
@@ -22,6 +32,7 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
         KeyboardShortcutSettings.settingsFileStore = originalSettingsFileStore
         AppIconSettings.resetLiveEnvironmentProviderForTesting()
         AppearanceSettings.resetLiveEnvironmentProviderForTesting()
+        AppearanceSettingsUserDefaultsObserver.shared.startObserving()
         KeyboardShortcutSettings.resetAll()
         super.tearDown()
     }
@@ -672,7 +683,7 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
 
     func testManagedBoolUserDefaultSurvivesSettingsFileReapplyUntilFileChanges() throws {
         let defaults = UserDefaults.standard
-        let key = QuitWarningSettings.warnBeforeQuitKey
+        let key = AppCatalogSection().warnBeforeQuit.userDefaultsKey
 
         try preservingDefaults(keys: [key, settingsFileBackupsDefaultsKey, importedManagedDefaultsKey]) {
             defaults.removeObject(forKey: key)
@@ -735,7 +746,7 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
 
     func testConfirmQuitImportsEnumFromCmuxJSON() throws {
         let defaults = UserDefaults.standard
-        let key = QuitWarningSettings.confirmQuitKey
+        let key = AppCatalogSection().confirmQuitMode.userDefaultsKey
 
         try preservingDefaults(keys: [key, settingsFileBackupsDefaultsKey, importedManagedDefaultsKey]) {
             defaults.removeObject(forKey: key)
@@ -764,15 +775,15 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 startWatching: false
             )
 
-            XCTAssertEqual(defaults.string(forKey: key), QuitConfirmationMode.dirtyOnly.rawValue)
-            XCTAssertEqual(QuitWarningSettings.confirmQuitMode(defaults: defaults), .dirtyOnly)
+            XCTAssertEqual(defaults.string(forKey: key), ConfirmQuitMode.dirtyOnly.rawValue)
+            XCTAssertEqual(QuitConfirmationStore(defaults: defaults).confirmQuitMode, .dirtyOnly)
         }
     }
 
     func testLegacyWarnBeforeQuitMapsToConfirmQuitWhenConfirmQuitIsAbsent() throws {
         let defaults = UserDefaults.standard
-        let confirmQuitKey = QuitWarningSettings.confirmQuitKey
-        let warnBeforeQuitKey = QuitWarningSettings.warnBeforeQuitKey
+        let confirmQuitKey = AppCatalogSection().confirmQuitMode.userDefaultsKey
+        let warnBeforeQuitKey = AppCatalogSection().warnBeforeQuit.userDefaultsKey
 
         try preservingDefaults(keys: [
             confirmQuitKey,
@@ -780,7 +791,7 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
             settingsFileBackupsDefaultsKey,
             importedManagedDefaultsKey,
         ]) {
-            defaults.set(QuitConfirmationMode.always.rawValue, forKey: confirmQuitKey)
+            defaults.set(ConfirmQuitMode.always.rawValue, forKey: confirmQuitKey)
             defaults.removeObject(forKey: warnBeforeQuitKey)
             defaults.removeObject(forKey: settingsFileBackupsDefaultsKey)
             defaults.removeObject(forKey: importedManagedDefaultsKey)
@@ -807,16 +818,16 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 startWatching: false
             )
 
-            XCTAssertEqual(defaults.string(forKey: confirmQuitKey), QuitConfirmationMode.never.rawValue)
+            XCTAssertEqual(defaults.string(forKey: confirmQuitKey), ConfirmQuitMode.never.rawValue)
             XCTAssertEqual(defaults.object(forKey: warnBeforeQuitKey) as? Bool, false)
-            XCTAssertEqual(QuitWarningSettings.confirmQuitMode(defaults: defaults), .never)
+            XCTAssertEqual(QuitConfirmationStore(defaults: defaults).confirmQuitMode, .never)
         }
     }
 
     func testLegacyWarnBeforeQuitMigrationPreservesUserOverride() throws {
         let defaults = UserDefaults.standard
-        let confirmQuitKey = QuitWarningSettings.confirmQuitKey
-        let warnBeforeQuitKey = QuitWarningSettings.warnBeforeQuitKey
+        let confirmQuitKey = AppCatalogSection().confirmQuitMode.userDefaultsKey
+        let warnBeforeQuitKey = AppCatalogSection().warnBeforeQuit.userDefaultsKey
 
         try preservingDefaults(keys: [
             confirmQuitKey,
@@ -856,21 +867,21 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
 
             XCTAssertNil(defaults.string(forKey: confirmQuitKey))
             XCTAssertEqual(defaults.object(forKey: warnBeforeQuitKey) as? Bool, true)
-            XCTAssertEqual(QuitWarningSettings.confirmQuitMode(defaults: defaults), .always)
+            XCTAssertEqual(QuitConfirmationStore(defaults: defaults).confirmQuitMode, .always)
 
             try writeSettingsFile("{}", to: settingsFileURL)
             store.reload()
 
             XCTAssertNil(defaults.string(forKey: confirmQuitKey))
             XCTAssertEqual(defaults.object(forKey: warnBeforeQuitKey) as? Bool, true)
-            XCTAssertEqual(QuitWarningSettings.confirmQuitMode(defaults: defaults), .always)
+            XCTAssertEqual(QuitConfirmationStore(defaults: defaults).confirmQuitMode, .always)
         }
     }
 
     func testInvalidConfirmQuitDoesNotAbortRemainingAppSettings() throws {
         let defaults = UserDefaults.standard
-        let confirmQuitKey = QuitWarningSettings.confirmQuitKey
-        let warnBeforeQuitKey = QuitWarningSettings.warnBeforeQuitKey
+        let confirmQuitKey = AppCatalogSection().confirmQuitMode.userDefaultsKey
+        let warnBeforeQuitKey = AppCatalogSection().warnBeforeQuit.userDefaultsKey
 
         try preservingDefaults(keys: [
             confirmQuitKey,
@@ -906,9 +917,9 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 startWatching: false
             )
 
-            XCTAssertEqual(defaults.string(forKey: confirmQuitKey), QuitConfirmationMode.never.rawValue)
+            XCTAssertEqual(defaults.string(forKey: confirmQuitKey), ConfirmQuitMode.never.rawValue)
             XCTAssertEqual(defaults.object(forKey: warnBeforeQuitKey) as? Bool, false)
-            XCTAssertEqual(QuitWarningSettings.confirmQuitMode(defaults: defaults), .never)
+            XCTAssertEqual(QuitConfirmationStore(defaults: defaults).confirmQuitMode, .never)
         }
     }
 
@@ -917,15 +928,19 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
         let defaults = UserDefaults.standard
         let scrollBarKey = TerminalScrollBarSettings.showScrollBarKey
         let autoResumeKey = AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
+        let adaptiveDefaultThemeKey =
+            TerminalAdaptiveDefaultThemeSettings.userDefaultsKey
 
         try preservingDefaults(keys: [
             scrollBarKey,
             autoResumeKey,
+            adaptiveDefaultThemeKey,
             settingsFileBackupsDefaultsKey,
             importedManagedDefaultsKey,
         ]) {
             defaults.removeObject(forKey: scrollBarKey)
             defaults.removeObject(forKey: autoResumeKey)
+            defaults.removeObject(forKey: adaptiveDefaultThemeKey)
             defaults.removeObject(forKey: settingsFileBackupsDefaultsKey)
             defaults.removeObject(forKey: importedManagedDefaultsKey)
 
@@ -938,7 +953,8 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 {
                   "terminal": {
                     "showScrollBar": false,
-                    "autoResumeAgentSessions": false
+                    "autoResumeAgentSessions": false,
+                    "adaptiveDefaultTheme": true
                   }
                 }
                 """,
@@ -948,6 +964,7 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
             let notificationCenter = NotificationCenter()
             var scrollBarNotificationCount = 0
             var autoResumeNotificationCount = 0
+            var adaptiveDefaultThemeNotificationCount = 0
             let scrollBarObserver = notificationCenter.addObserver(
                 forName: TerminalScrollBarSettings.didChangeNotification,
                 object: nil,
@@ -962,9 +979,18 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
             ) { _ in
                 autoResumeNotificationCount += 1
             }
+            let adaptiveDefaultThemeObserver = notificationCenter.addObserver(
+                forName:
+                    TerminalAdaptiveDefaultThemeSettings.didChangeNotification,
+                object: nil,
+                queue: nil
+            ) { _ in
+                adaptiveDefaultThemeNotificationCount += 1
+            }
             defer {
                 notificationCenter.removeObserver(scrollBarObserver)
                 notificationCenter.removeObserver(autoResumeObserver)
+                notificationCenter.removeObserver(adaptiveDefaultThemeObserver)
             }
 
             let store = KeyboardShortcutSettingsFileStore(
@@ -977,13 +1003,19 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
 
             XCTAssertEqual(defaults.object(forKey: scrollBarKey) as? Bool, false)
             XCTAssertEqual(defaults.object(forKey: autoResumeKey) as? Bool, false)
+            XCTAssertTrue(
+                TerminalAdaptiveDefaultThemeSettings(defaults: defaults)
+                    .isEnabled
+            )
             XCTAssertEqual(scrollBarNotificationCount, 0)
             XCTAssertEqual(autoResumeNotificationCount, 0)
+            XCTAssertEqual(adaptiveDefaultThemeNotificationCount, 0)
 
             store.applyDeferredManagedDefaultSideEffects()
 
             XCTAssertEqual(scrollBarNotificationCount, 1)
             XCTAssertEqual(autoResumeNotificationCount, 1)
+            XCTAssertEqual(adaptiveDefaultThemeNotificationCount, 1)
         }
     }
 
@@ -1195,15 +1227,15 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
     func testSettingsFileStoreAppliesCustomBrowserSearchEngine() throws {
         let defaults = UserDefaults.standard
         try preservingDefaults(keys: [
-            BrowserSearchSettings.searchEngineKey,
-            BrowserSearchSettings.customSearchEngineNameKey,
-            BrowserSearchSettings.customSearchEngineURLTemplateKey,
+            BrowserSearchSettingsStore.searchEngineKey,
+            BrowserSearchSettingsStore.customSearchEngineNameKey,
+            BrowserSearchSettingsStore.customSearchEngineURLTemplateKey,
             settingsFileBackupsDefaultsKey,
             importedManagedDefaultsKey,
         ]) {
-            defaults.removeObject(forKey: BrowserSearchSettings.searchEngineKey)
-            defaults.removeObject(forKey: BrowserSearchSettings.customSearchEngineNameKey)
-            defaults.removeObject(forKey: BrowserSearchSettings.customSearchEngineURLTemplateKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.searchEngineKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.customSearchEngineNameKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.customSearchEngineURLTemplateKey)
             defaults.removeObject(forKey: settingsFileBackupsDefaultsKey)
             defaults.removeObject(forKey: importedManagedDefaultsKey)
 
@@ -1231,7 +1263,7 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 startWatching: false
             )
 
-            let configuration = BrowserSearchSettings.currentConfiguration(defaults: defaults)
+            let configuration = BrowserSearchSettingsStore(defaults: defaults).currentConfiguration
             let url = try XCTUnwrap(configuration.searchURL(query: "browser settings"))
 
             XCTAssertEqual(configuration.engine, .custom)
@@ -1241,21 +1273,55 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
         }
     }
 
+    func testSettingsFileStoreAppliesBrowserDefaultZoomLevel() throws {
+        let defaults = UserDefaults.standard
+        let key = "browserDefaultZoomLevel"
+        try preservingDefaults(keys: [key, settingsFileBackupsDefaultsKey, importedManagedDefaultsKey]) {
+            defaults.removeObject(forKey: key)
+            defaults.removeObject(forKey: settingsFileBackupsDefaultsKey)
+            defaults.removeObject(forKey: importedManagedDefaultsKey)
+
+            let directoryURL = try makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directoryURL) }
+
+            let settingsFileURL = directoryURL.appendingPathComponent("cmux.json", isDirectory: false)
+            try writeSettingsFile(
+                """
+                {
+                  "browser": {
+                    "defaultZoomLevel": 0.8
+                  }
+                }
+                """,
+                to: settingsFileURL
+            )
+
+            _ = KeyboardShortcutSettingsFileStore(
+                primaryPath: settingsFileURL.path,
+                fallbackPath: nil,
+                additionalFallbackPaths: [],
+                startWatching: false
+            )
+
+            XCTAssertEqual(defaults.double(forKey: key), 0.8)
+        }
+    }
+
     func testSettingsFileStoreAppliesBlankCustomBrowserSearchNameAndIgnoresInvalidCustomURLWithoutAbortingBrowserSection() throws {
         let defaults = UserDefaults.standard
         try preservingDefaults(keys: [
-            BrowserSearchSettings.searchEngineKey,
-            BrowserSearchSettings.customSearchEngineNameKey,
-            BrowserSearchSettings.customSearchEngineURLTemplateKey,
-            BrowserSearchSettings.searchSuggestionsEnabledKey,
+            BrowserSearchSettingsStore.searchEngineKey,
+            BrowserSearchSettingsStore.customSearchEngineNameKey,
+            BrowserSearchSettingsStore.customSearchEngineURLTemplateKey,
+            BrowserSearchSettingsStore.searchSuggestionsEnabledKey,
             BrowserThemeSettings.modeKey,
             settingsFileBackupsDefaultsKey,
             importedManagedDefaultsKey,
         ]) {
-            defaults.removeObject(forKey: BrowserSearchSettings.searchEngineKey)
-            defaults.removeObject(forKey: BrowserSearchSettings.customSearchEngineNameKey)
-            defaults.removeObject(forKey: BrowserSearchSettings.customSearchEngineURLTemplateKey)
-            defaults.removeObject(forKey: BrowserSearchSettings.searchSuggestionsEnabledKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.searchEngineKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.customSearchEngineNameKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.customSearchEngineURLTemplateKey)
+            defaults.removeObject(forKey: BrowserSearchSettingsStore.searchSuggestionsEnabledKey)
             defaults.removeObject(forKey: BrowserThemeSettings.modeKey)
             defaults.removeObject(forKey: settingsFileBackupsDefaultsKey)
             defaults.removeObject(forKey: importedManagedDefaultsKey)
@@ -1286,16 +1352,16 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
                 startWatching: false
             )
 
-            XCTAssertEqual(defaults.string(forKey: BrowserSearchSettings.searchEngineKey), BrowserSearchEngine.google.rawValue)
+            XCTAssertEqual(defaults.string(forKey: BrowserSearchSettingsStore.searchEngineKey), BrowserSearchEngine.google.rawValue)
             XCTAssertEqual(
-                defaults.string(forKey: BrowserSearchSettings.customSearchEngineNameKey),
-                BrowserSearchSettings.defaultCustomSearchEngineName
+                defaults.string(forKey: BrowserSearchSettingsStore.customSearchEngineNameKey),
+                BrowserSearchSettingsStore.defaultCustomSearchEngineName
             )
             XCTAssertNotEqual(
-                defaults.string(forKey: BrowserSearchSettings.customSearchEngineURLTemplateKey),
+                defaults.string(forKey: BrowserSearchSettingsStore.customSearchEngineURLTemplateKey),
                 "ftp://search.example.test?q={query}"
             )
-            XCTAssertEqual(defaults.object(forKey: BrowserSearchSettings.searchSuggestionsEnabledKey) as? Bool, false)
+            XCTAssertEqual(defaults.object(forKey: BrowserSearchSettingsStore.searchSuggestionsEnabledKey) as? Bool, false)
             XCTAssertEqual(defaults.string(forKey: BrowserThemeSettings.modeKey), BrowserThemeMode.dark.rawValue)
         }
     }
@@ -1359,8 +1425,14 @@ final class KeyboardShortcutSettingsFileStoreStartupTests: XCTestCase {
 
     private func preservingDefaults(keys: [String], _ body: () throws -> Void) rethrows {
         let defaults = UserDefaults.standard
+        // Snapshot from the persistent domain, not object(forKey:): the resolved
+        // value includes registered fallbacks (e.g. BrowserPanel's browser
+        // defaults registration), and the restore below would persist such a
+        // fallback for a key that was never actually written.
+        let domainName = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
+        let persisted = defaults.persistentDomain(forName: domainName) ?? [:]
         let previousValues = keys.map { key in
-            (key: key, value: defaults.object(forKey: key))
+            (key: key, value: persisted[key])
         }
         defer {
             for previous in previousValues {

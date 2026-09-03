@@ -1,5 +1,9 @@
 import AppKit
+import CMUXMobileCore
+import CmuxWorkspaces
+import CmuxSettings
 import CmuxSettingsUI
+import CmuxFoundation
 import Foundation
 import OSLog
 import SwiftUI
@@ -14,6 +18,9 @@ private let hostSettingsLogger = Logger(subsystem: "com.cmuxterm.app", category:
 @MainActor
 final class HostSettingsActions: SettingsHostActions {
     private let configFileURL: URL
+    private let computerUseRuntimeService: ComputerUseRuntimeService
+    private var runComputerUseOnboardingAction:
+        @MainActor (ComputerUseOnboardingWindowController.StartingPoint) -> Void = { _ in }
 
     /// Serializes font-size config writes so rapid slider saves persist in order.
     private let fontConfigWriter = FontConfigWriter()
@@ -37,10 +44,15 @@ final class HostSettingsActions: SettingsHostActions {
     /// Retains the AppKit window hosting ``ConfigSettingsView`` so repeated
     /// "Open Config" presses reuse the same dedicated terminal-config
     /// window instead of stacking duplicates.
-    private weak var configWindow: NSWindow?
+    private var configWindow: NSWindow?
+    private var configWindowCloseObserver: WindowCloseObserver?
 
-    init(configFileURL: URL) {
+    init(
+        configFileURL: URL,
+        computerUseRuntimeService: ComputerUseRuntimeService
+    ) {
         self.configFileURL = configFileURL
+        self.computerUseRuntimeService = computerUseRuntimeService
         startObservingAppIconMode()
     }
 
@@ -69,12 +81,96 @@ final class HostSettingsActions: SettingsHostActions {
         BrowserHistoryStore.shared.clearHistory()
     }
 
+    func sleepyModePreview() {
+        SleepyModeController.shared.preview()
+    }
+
+    func sleepyModeStart() {
+        SleepyModeController.shared.activate()
+    }
+
+    func sleepyModeStore() -> SleepyModeSettingsStore {
+        SleepyModeController.shared.store
+    }
+
+    func resetAllSettingsSideEffects() {
+        LanguageSettingsStore(defaults: .standard).applyLanguageOverride(.system)
+        PaneChromeSettings.notifyDidChange()
+        TerminalAdaptiveDefaultThemeSettings.notifyDidChange()
+        PhonePushClient.shared.reloadConfigurationFromDefaults()
+        AppDelegate.shared?.reconcileSocketListenerConfiguration(source: "settings.reset_all")
+    }
+
+    func terminalAdaptiveDefaultThemeDidChange() {
+        TerminalAdaptiveDefaultThemeSettings.notifyDidChange()
+    }
+
+    func notifyShortcutSettingsDidChange() {
+        // reload() already posts didChangeNotification when the file's
+        // contents changed; posting again here double-notified every
+        // listener. Only post when the reload saw no change, so callers
+        // still get exactly one notification either way.
+        if !KeyboardShortcutSettings.settingsFileStore.reload(notificationSourceURL: configFileURL) {
+            KeyboardShortcutSettings.notifySettingsFileDidChange(sourceURL: configFileURL)
+        }
+    }
+
+    func canRegisterSystemWideHotkey(
+        _ shortcut: CmuxSettings.StoredShortcut
+    ) -> Bool {
+        SystemWideHotkeySettings.registrationCandidate(
+            for: StoredShortcut(cmuxSettingsStoredShortcut: shortcut)
+        ) != nil
+    }
+
+    func applyLanguageOverride(_ language: AppLanguage) {
+        LanguageSettingsStore(defaults: .standard).applyLanguageOverride(language)
+    }
+
+    func refreshComputerUsePermissions() async {
+        _ = await computerUseRuntimeService.refreshHelperStatus()
+    }
+
+    func computerUseAccessibilityGranted() -> Bool {
+        computerUseRuntimeService.status().accessibility
+    }
+
+    func computerUseScreenRecordingGranted() -> Bool {
+        computerUseRuntimeService.status().screenRecording
+    }
+
+    func computerUsePermissionStatusIsKnown() -> Bool {
+        computerUseRuntimeService.permissionStatusIsKnown
+    }
+
+    func requestComputerUseAccessibility() {
+        runComputerUseOnboardingAction(.accessibility)
+    }
+
+    func requestComputerUseScreenRecording() {
+        runComputerUseOnboardingAction(.screenRecording)
+    }
+
+    func openComputerUseAccessibilitySettings() {
+        runComputerUseOnboardingAction(.accessibility)
+    }
+
+    func openComputerUseScreenRecordingSettings() {
+        runComputerUseOnboardingAction(.screenRecording)
+    }
+
+    func setRunComputerUseOnboardingAction(
+        _ action: @escaping @MainActor (ComputerUseOnboardingWindowController.StartingPoint) -> Void
+    ) {
+        runComputerUseOnboardingAction = action
+    }
+
     func openConfigInExternalEditor() {
         // Honor the user's configured editor (`preferredEditorCommand`),
         // falling back to the OS default. Opening the config file directly
         // through `NSWorkspace.shared.open` would route to the default
         // `.json` handler and ignore the cmux setting.
-        PreferredEditorSettings.open(configFileURL)
+        PreferredEditorService(defaults: .standard).open(configFileURL)
     }
 
     func sendFeedback() {
@@ -87,8 +183,53 @@ final class HostSettingsActions: SettingsHostActions {
     }
 
     func openSystemNotificationSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") else { return }
-        NSWorkspace.shared.open(url)
+        TerminalNotificationStore.shared.openNotificationSettings()
+    }
+
+    func desktopNotificationAuthorizationStatus() -> DesktopNotificationAuthorizationState {
+        Self.desktopNotificationAuthorizationState(from: TerminalNotificationStore.shared.authorizationState)
+    }
+
+    func desktopNotificationAuthorizationStatusUpdates() -> AsyncStream<DesktopNotificationAuthorizationState> {
+        AsyncStream { continuation in
+            let (signals, signalContinuation) = AsyncStream<Void>.makeStream(
+                bufferingPolicy: .bufferingNewest(1)
+            )
+            let observer = MobileHostStatusObserverToken(
+                NotificationCenter.default.addObserver(
+                    forName: TerminalNotificationStore.authorizationStatusDidChangeNotification,
+                    object: nil,
+                    queue: nil
+                ) { _ in
+                    signalContinuation.yield(())
+                }
+            )
+            let drainTask = Task { @MainActor in
+                continuation.yield(
+                    Self.desktopNotificationAuthorizationState(
+                        from: TerminalNotificationStore.shared.authorizationState
+                    )
+                )
+                for await _ in signals {
+                    if Task.isCancelled { break }
+                    continuation.yield(
+                        Self.desktopNotificationAuthorizationState(
+                            from: TerminalNotificationStore.shared.authorizationState
+                        )
+                    )
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in
+                drainTask.cancel()
+                signalContinuation.finish()
+                observer.remove()
+            }
+        }
+    }
+
+    func refreshDesktopNotificationAuthorizationStatus() {
+        TerminalNotificationStore.shared.refreshAuthorizationStatus()
     }
 
     func restartApp() {
@@ -98,6 +239,12 @@ final class HostSettingsActions: SettingsHostActions {
         task.arguments = ["-n", bundlePath]
         try? task.run()
         NSApp.terminate(nil)
+    }
+
+    func socketControlConfigurationDidChange() {
+        AppDelegate.shared?.reconcileSocketListenerConfiguration(
+            source: "settings.automation.socketControlMode.commit"
+        )
     }
 
     func openBrowserImportFlow() {
@@ -135,8 +282,134 @@ final class HostSettingsActions: SettingsHostActions {
         window.setContentSize(NSSize(width: 980, height: 680))
         window.center()
         configWindow = window
+        configWindowCloseObserver = WindowCloseObserver(window: window) { [weak self] in
+            self?.releaseConfigWindow($0)
+        }
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
+    }
+
+    func customizeWorkspaceLayouts() {
+        guard let appDelegate = AppDelegate.shared else {
+            SidebarWorkspaceGroupConfigOpener.openCmuxConfigInEditor()
+            return
+        }
+        appDelegate.openWorkspaceLayoutsCustomization()
+    }
+
+    func setMenuBarOnly(_ enabled: Bool) -> Bool {
+        MenuBarOnlySettings.setEnabled(enabled)
+        return true
+    }
+
+    func openMobilePairingWindow() {
+        _ = AppDelegate.shared?.performMobileConnectWorkspaceAction(
+            enforceFeatureFlag: false,
+            bringWindowForward: true,
+            debugSource: "settings.mobileConnect"
+        )
+    }
+
+    var isCloudMachinesAvailable: Bool {
+        CloudMachinesFeature.isEnabled
+    }
+
+    func cloudMachinesPlanSummary() async -> CloudMachinesPlanSummary? {
+        guard let client = VMClient.shared else { return nil }
+        guard let page = try? await client.listPage(), let limits = page.limits else { return nil }
+        // Same classifier as the Machines panel so Settings and the panel never
+        // disagree about an unknown plan id (both fail closed to "not paid").
+        let isPaid = MachinePlanSnapshot.isPaidPlanID(limits.planId)
+        let planLabel = isPaid
+            ? limits.planId.capitalized
+            : String(localized: "settings.cloudMachines.plan.free", defaultValue: "Free")
+        return CloudMachinesPlanSummary(
+            planLabel: planLabel,
+            activeMachines: page.vms.count,
+            maxMachines: limits.maxActiveVms,
+            isPaidPlan: isPaid
+        )
+    }
+
+    func openCloudMachinesPanel() {
+        _ = AppDelegate.shared?.focusRightSidebarInActiveMainWindow(mode: .machines)
+    }
+
+    func openCloudMachinesBilling() {
+        ProUpgradePresenter.present()
+    }
+
+    func mobilePhonePushSettings() -> MobilePhonePushSettingsSnapshot {
+        Self.mobilePhonePushSettingsSnapshot(
+            from: PhonePushClient.shared.configuration()
+        )
+    }
+
+    func mobilePhonePushSettingsUpdates() -> AsyncStream<MobilePhonePushSettingsSnapshot> {
+        AsyncStream { continuation in
+            let (signals, signalContinuation) = AsyncStream<Void>.makeStream(
+                bufferingPolicy: .bufferingNewest(1)
+            )
+            let observer = MobileHostStatusObserverToken(
+                NotificationCenter.default.addObserver(
+                    forName: PhonePushClient.settingsDidChangeNotification,
+                    object: nil,
+                    queue: nil
+                ) { _ in
+                    signalContinuation.yield(())
+                }
+            )
+            let drainTask = Task { @MainActor in
+                continuation.yield(mobilePhonePushSettings())
+                for await _ in signals {
+                    if Task.isCancelled { break }
+                    continuation.yield(mobilePhonePushSettings())
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in
+                drainTask.cancel()
+                signalContinuation.finish()
+                observer.remove()
+            }
+        }
+    }
+
+    func updateMobilePhonePushSettings(
+        _ mutation: MobilePhonePushSettingsMutation
+    ) -> MobilePhonePushSettingsSnapshot {
+        let configuration: PhonePushConfiguration
+        switch mutation {
+        case let .forwardingEnabled(enabled):
+            configuration = PhonePushClient.shared.updateSettings(
+                forwardingEnabled: enabled
+            )
+        case let .mode(mode):
+            let hostMode: PhoneForwardingMode = switch mode {
+            case .onlyWhenAway: .onlyWhenAway
+            case .always: .always
+            }
+            configuration = PhonePushClient.shared.updateSettings(mode: hostMode)
+        case let .hideContent(hidden):
+            configuration = PhonePushClient.shared.updateSettings(
+                hideContent: hidden
+            )
+        }
+        return Self.mobilePhonePushSettingsSnapshot(from: configuration)
+    }
+
+    private static func mobilePhonePushSettingsSnapshot(
+        from configuration: PhonePushConfiguration
+    ) -> MobilePhonePushSettingsSnapshot {
+        let mode: MobilePhonePushSettingsSnapshot.Mode = switch configuration.mode {
+        case .onlyWhenAway: .onlyWhenAway
+        case .always: .always
+        }
+        return MobilePhonePushSettingsSnapshot(
+            forwardingEnabled: configuration.forwardingEnabled,
+            mode: mode,
+            hideContent: configuration.hideContent
+        )
     }
 
     private func existingConfigWindow() -> NSWindow? {
@@ -148,8 +421,16 @@ final class HostSettingsActions: SettingsHostActions {
         }
     }
 
-    func previewNotificationSound() {
-        NSSound(named: NSSound.Name("Glass"))?.play()
+    private func releaseConfigWindow(_ window: NSWindow) {
+        guard configWindow === window else { return }
+        configWindowCloseObserver = nil
+        window.contentView = nil
+        window.contentViewController = nil
+        configWindow = nil
+    }
+
+    func previewNotificationSound(value: String, customFilePath: String) {
+        NotificationSoundSettings.previewSound(value: value, customFilePath: customFilePath)
     }
 
     func browserHistoryEntryCount() -> Int? {
@@ -161,7 +442,7 @@ final class HostSettingsActions: SettingsHostActions {
         // Reads the in-memory cache (kept current by config reloads) rather than
         // forcing a synchronous disk read on the main actor when Settings opens.
         SettingsFontSize(
-            points: Double(GhosttyConfig.load().sidebarFontSize),
+            points: Double(GhosttyConfig.loadForCmux().sidebarFontSize),
             minimum: CmuxGhosttyConfigSettingEditor.minSidebarFontSize,
             maximum: CmuxGhosttyConfigSettingEditor.maxSidebarFontSize,
             defaultValue: CmuxGhosttyConfigSettingEditor.defaultSidebarFontSize
@@ -171,7 +452,7 @@ final class HostSettingsActions: SettingsHostActions {
     func setSidebarFontSize(_ points: Double) async -> Bool {
         await persistFontSize(
             key: CmuxGhosttyConfigSettingEditor.sidebarFontSizeKey,
-            points: CmuxGhosttyConfigSettingEditor.clampedSidebarFontSize(points),
+            points: CmuxGhosttyConfigSettingEditor().clampedSidebarFontSize(points),
             reloadSource: "settings.sidebar.fontSize"
         )
     }
@@ -179,7 +460,7 @@ final class HostSettingsActions: SettingsHostActions {
     func surfaceTabBarFontSize() -> SettingsFontSize {
         // See ``sidebarFontSize()`` — uses the cached config to avoid main-actor disk I/O.
         SettingsFontSize(
-            points: Double(GhosttyConfig.load().surfaceTabBarFontSize),
+            points: Double(GhosttyConfig.loadForCmux().surfaceTabBarFontSize),
             minimum: CmuxGhosttyConfigSettingEditor.minSurfaceTabBarFontSize,
             maximum: CmuxGhosttyConfigSettingEditor.maxSurfaceTabBarFontSize,
             defaultValue: CmuxGhosttyConfigSettingEditor.defaultSurfaceTabBarFontSize
@@ -189,13 +470,186 @@ final class HostSettingsActions: SettingsHostActions {
     func setSurfaceTabBarFontSize(_ points: Double) async -> Bool {
         await persistFontSize(
             key: CmuxGhosttyConfigSettingEditor.surfaceTabBarFontSizeKey,
-            points: CmuxGhosttyConfigSettingEditor.clampedSurfaceTabBarFontSize(points),
+            points: CmuxGhosttyConfigSettingEditor().clampedSurfaceTabBarFontSize(points),
             reloadSource: "settings.terminal.tabBarFontSize"
         )
     }
 
     func formattedFontSize(_ points: Double) -> String {
-        CmuxGhosttyConfigSettingEditor.formattedFontSize(points)
+        CmuxGhosttyConfigSettingEditor().formattedFontSize(points)
+    }
+
+    func mobilePairingStatus() -> MobilePairingStatusSnapshot? {
+        Self.mobilePairingSnapshot(from: MobileHostService.shared.statusSnapshot())
+    }
+
+    func mobilePairingStatusUpdates() -> AsyncStream<MobilePairingStatusSnapshot> {
+        AsyncStream { continuation in
+            // Bridge the notification through a Sendable `Void` signal stream so
+            // the non-Sendable `Notification` never crosses into the MainActor
+            // drain task. Mirrors `UserDefaultsSettingsStore.values(for:)`.
+            let (signals, signalContinuation) = AsyncStream<Void>.makeStream(
+                bufferingPolicy: .bufferingNewest(1)
+            )
+            let observer = MobileHostStatusObserverToken(
+                NotificationCenter.default.addObserver(
+                    forName: .mobileHostStatusDidChange,
+                    object: nil,
+                    queue: nil
+                ) { _ in
+                    signalContinuation.yield(())
+                }
+            )
+            let drainTask = Task { @MainActor in
+                // Seed with the current status, then forward every change.
+                continuation.yield(Self.mobilePairingSnapshot(from: MobileHostService.shared.statusSnapshot()))
+                for await _ in signals {
+                    if Task.isCancelled { break }
+                    continuation.yield(Self.mobilePairingSnapshot(from: MobileHostService.shared.statusSnapshot()))
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in
+                drainTask.cancel()
+                signalContinuation.finish()
+                observer.remove()
+            }
+        }
+    }
+
+    func irohSettingsController() -> (any CmxIrohSettingsControlling)? {
+        // Exactly one runtime owns the transport slot (gated in
+        // MobileHostService.configure); Settings must read the same one, or
+        // the Networking section reports the dormant stack's stale state.
+        if MobileHostIrxRuntime.isEnabled {
+            return MobileHostIrxRuntime.shared
+        }
+        return MobileHostIrohRuntime.shared
+    }
+
+    /// Maps the host's ``MobileHostServiceStatus`` into the settings package's
+    /// Foundation-only ``MobilePairingStatusSnapshot``. Static so the status
+    /// stream's forwarding task does not retain this host bridge. Internal
+    /// (not private) so the mapping is unit-testable.
+    nonisolated static func mobilePairingSnapshot(
+        from status: MobileHostServiceStatus,
+        now: Date = Date()
+    ) -> MobilePairingStatusSnapshot {
+        var seenEndpoints = Set<String>()
+        let routes = status.routes.flatMap { route -> [MobilePairingRoute] in
+            switch route.endpoint {
+            case let .hostPort(host, port):
+                return [MobilePairingRoute(
+                    id: route.id,
+                    kindLabel: routeKindLabel(route.kind),
+                    host: host,
+                    port: port
+                )]
+            case let .peer(_, pathHints):
+                // The Iroh endpoint's registered UDP socket addresses: the
+                // port Direct addresses actually dial, which can differ from
+                // the configured preference when that UDP port was taken.
+                return pathHints.compactMap { hint in
+                    guard hint.kind == .directAddress,
+                          hint.isUsable(at: now),
+                          seenEndpoints.insert(hint.value).inserted,
+                          let address = splitSocketAddress(hint.value)
+                    else { return nil }
+                    return MobilePairingRoute(
+                        id: "\(route.id):\(hint.value)",
+                        kindLabel: routeKindLabel(route.kind),
+                        host: address.host,
+                        port: address.port
+                    )
+                }
+            case .url:
+                return []
+            }
+        }
+        return MobilePairingStatusSnapshot(
+            isRunning: status.isRunning,
+            configuredPort: status.configuredPort,
+            boundPort: status.port,
+            usesEphemeralFallback: status.usesEphemeralFallback,
+            activeConnectionCount: status.activeConnectionCount,
+            routes: routes
+        )
+    }
+
+    /// Splits an Iroh direct-address hint (`203.0.113.7:58465` or
+    /// `[2001:db8::7]:58465`) into the host and port ``MobilePairingRoute``
+    /// renders, or `nil` for anything else. Internal for unit tests.
+    nonisolated static func splitSocketAddress(_ value: String) -> (host: String, port: Int)? {
+        let hostPart: Substring
+        let portPart: Substring
+        if value.hasPrefix("[") {
+            guard let closing = value.firstIndex(of: "]") else { return nil }
+            hostPart = value[value.index(after: value.startIndex)..<closing]
+            let remainder = value[value.index(after: closing)...]
+            guard remainder.first == ":" else { return nil }
+            portPart = remainder.dropFirst()
+        } else {
+            guard let separator = value.lastIndex(of: ":"),
+                  !value[..<separator].contains(":") else { return nil }
+            hostPart = value[..<separator]
+            portPart = value[value.index(after: separator)...]
+        }
+        guard !hostPart.isEmpty,
+              let port = Int(portPart),
+              (1...65535).contains(port) else { return nil }
+        return (String(hostPart), port)
+    }
+
+    private static func desktopNotificationAuthorizationState(
+        from state: NotificationAuthorizationState
+    ) -> DesktopNotificationAuthorizationState {
+        switch state {
+        case .unknown:
+            return .unknown
+        case .notDetermined:
+            return .notDetermined
+        case .authorized:
+            return .authorized
+        case .denied:
+            return .denied
+        case .provisional:
+            return .provisional
+        case .ephemeral:
+            return .ephemeral
+        }
+    }
+
+    func mobilePairingDefaultDisplayName() -> String {
+        // The Mac's system name, the pairing name used when no override is set.
+        // Stable across override edits, so the placeholder never goes stale.
+        Host.current().localizedName ?? ""
+    }
+
+    func applyMobilePairingPort(_ port: Int) async -> MobilePairingPortApplyResult {
+        switch await MobileHostService.shared.applyConfiguredPort(port) {
+        case .applied(let bound):
+            return .applied(port: bound)
+        case .portInUse:
+            return .portInUse(requestedPort: port)
+        case .savedWhileDisabled:
+            return .savedForLater(port: port)
+        case .invalid:
+            return .invalid(requestedPort: port)
+        }
+    }
+
+    /// Localized transport label for a pairing route shown in diagnostics.
+    nonisolated private static func routeKindLabel(_ kind: CmxAttachTransportKind) -> String {
+        switch kind {
+        case .tailscale:
+            return String(localized: "settings.mobile.route.tailscale", defaultValue: "Tailscale")
+        case .debugLoopback:
+            return String(localized: "settings.mobile.route.loopback", defaultValue: "Loopback")
+        case .iroh:
+            return String(localized: "settings.mobile.route.iroh", defaultValue: "Iroh")
+        case .websocket:
+            return String(localized: "settings.mobile.route.websocket", defaultValue: "WebSocket")
+        }
     }
 
     /// Writes a clamped font-size value to cmux's editable Ghostty config and
@@ -209,13 +663,31 @@ final class HostSettingsActions: SettingsHostActions {
     /// - Returns: `true` on success, `false` if the write failed (a generic
     ///   warning is logged here; the Settings UI surfaces a save-failed message).
     private func persistFontSize(key: String, points: Double, reloadSource: String) async -> Bool {
-        let formatted = CmuxGhosttyConfigSettingEditor.formattedFontSize(points)
+        let formatted = CmuxGhosttyConfigSettingEditor().formattedFontSize(points)
         guard await fontConfigWriter.write(key: key, value: formatted) else {
             hostSettingsLogger.warning("failed to persist \(key, privacy: .public)")
             return false
         }
         GhosttyApp.shared.reloadConfiguration(source: reloadSource)
         return true
+    }
+
+}
+
+/// Wraps the opaque observer returned by `NotificationCenter.addObserver` so the
+/// `@Sendable` stream-termination closure can hold it for removal. Objective-C
+/// doesn't model `Sendable`; the token is immutable and only hands the opaque
+/// observer back to NotificationCenter's thread-safe removal API. CmuxSettings
+/// has an identical internal token, which isn't `public`, so it's duplicated.
+final class MobileHostStatusObserverToken: @unchecked Sendable {
+    private let token: NSObjectProtocol
+
+    init(_ token: NSObjectProtocol) {
+        self.token = token
+    }
+
+    func remove() {
+        NotificationCenter.default.removeObserver(token)
     }
 }
 

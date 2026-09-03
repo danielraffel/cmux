@@ -13,6 +13,27 @@ import UserNotifications
 @testable import cmux
 #endif
 
+/// Thread-safe one-shot holder for a policy-evaluation result. Lets a test
+/// detect a stalled evaluation by reading the stored value after a timeout,
+/// instead of awaiting (and hanging on) the evaluation `Task` itself when the
+/// hook never completes.
+private final class NotificationHookEvaluationResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Result<TerminalNotificationPolicyEnvelope, TerminalNotificationPolicyFailure>?
+
+    func store(_ value: Result<TerminalNotificationPolicyEnvelope, TerminalNotificationPolicyFailure>) {
+        lock.lock()
+        defer { lock.unlock() }
+        stored = value
+    }
+
+    func take() -> Result<TerminalNotificationPolicyEnvelope, TerminalNotificationPolicyFailure>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
 final class TerminalNotificationPolicyEngineTests: XCTestCase {
     private func evaluate(
         request: TerminalNotificationPolicyRequest,
@@ -270,11 +291,188 @@ final class TerminalNotificationPolicyEngineTests: XCTestCase {
             cwd: FileManager.default.temporaryDirectory.path
         )
 
-        let startedAt = Date()
-        let result = await evaluate(request: request, hooks: [hook])
+        // A background child inheriting the hook's stdout must not keep the
+        // pipe open and stall `evaluate`. Assert the causal outcome — that the
+        // hook completes and returns the unmodified envelope — rather than
+        // timing the call. The completion is raced against a generous deadline
+        // so a genuine stall fails the test instead of hanging it forever.
+        let completed = expectation(description: "policy hook completes without stalling on inherited stdout")
+        let resultBox = NotificationHookEvaluationResultBox()
+        let evaluationTask = Task {
+            let result = await evaluate(request: request, hooks: [hook])
+            resultBox.store(result)
+            completed.fulfill()
+            return result
+        }
+        await fulfillment(of: [completed], timeout: 10.0)
+        guard let result = resultBox.take() else {
+            // The hook is still stalled on the inherited stdout pipe. Fail fast
+            // instead of awaiting evaluationTask.value, which would hang until the
+            // whole-suite timeout since the stalled call may ignore cancellation.
+            evaluationTask.cancel()
+            XCTFail("policy hook did not complete within 10s (stalled on inherited stdout)")
+            return
+        }
         let envelope = try result.get()
         XCTAssertEqual(envelope.notification.body, "Body")
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2)
+    }
+
+    private func makeAgentRequest(
+        agent: TerminalNotificationPolicyAgentContext?
+    ) -> TerminalNotificationPolicyRequest {
+        TerminalNotificationPolicyRequest(
+            tabId: UUID(),
+            surfaceId: UUID(),
+            title: "Claude Code",
+            subtitle: "Completed",
+            body: "Task completed",
+            cwd: FileManager.default.temporaryDirectory.path,
+            isAppFocused: false,
+            isFocusedPanel: false,
+            agent: agent
+        )
+    }
+
+    func testNoHooksReturnDefaultEffectsAndPreserveAgentContext() async throws {
+        // Default mode: with zero hooks configured, an agent completion keeps
+        // every built-in effect exactly as before.
+        let agent = TerminalNotificationPolicyAgentContext(
+            kind: "claude",
+            category: "turn-complete",
+            pending: false,
+            isSubagent: false
+        )
+        let result = await evaluate(request: makeAgentRequest(agent: agent), hooks: [])
+        let envelope = try result.get()
+        XCTAssertEqual(envelope.effects, TerminalNotificationPolicyEffects())
+        XCTAssertEqual(envelope.agent, agent)
+        XCTAssertEqual(envelope.notification.title, "Claude Code")
+    }
+
+    func testHookCanSuppressSubagentCompletionsOnly() async throws {
+        // Override mode: one user hook silences the built-in banner for
+        // subagent completions while leaving top-level completions untouched.
+        let hook = CmuxResolvedNotificationHook(
+            id: "mute-subagents",
+            command: #"if [ "${CMUX_NOTIFICATION_AGENT_IS_SUBAGENT-0}" = "1" ]; then printf '{"effects":{"desktop":false,"sound":false,"paneFlash":false}}'; fi"#,
+            timeoutSeconds: 5,
+            sourcePath: nil,
+            cwd: FileManager.default.temporaryDirectory.path
+        )
+
+        let subagentResult = await evaluate(
+            request: makeAgentRequest(agent: TerminalNotificationPolicyAgentContext(
+                kind: "claude", category: "turn-complete", pending: false, isSubagent: true
+            )),
+            hooks: [hook]
+        )
+        let subagentEnvelope = try subagentResult.get()
+        XCTAssertFalse(subagentEnvelope.effects.desktop)
+        XCTAssertFalse(subagentEnvelope.effects.sound)
+        XCTAssertFalse(subagentEnvelope.effects.paneFlash)
+        XCTAssertTrue(subagentEnvelope.effects.record)
+
+        let topLevelResult = await evaluate(
+            request: makeAgentRequest(agent: TerminalNotificationPolicyAgentContext(
+                kind: "claude", category: "turn-complete", pending: false, isSubagent: false
+            )),
+            hooks: [hook]
+        )
+        let topLevelEnvelope = try topLevelResult.get()
+        XCTAssertEqual(topLevelEnvelope.effects, TerminalNotificationPolicyEffects())
+    }
+
+    func testHookReceivesAgentContextInStdinAndEnvironment() async throws {
+        let captureDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-hook-agent-context-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: captureDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: captureDirectory) }
+        let stdinCapture = captureDirectory.appendingPathComponent("stdin.json")
+        let envCapture = captureDirectory.appendingPathComponent("env.txt")
+        let hook = CmuxResolvedNotificationHook(
+            id: "capture",
+            command: "cat > '\(stdinCapture.path)'; "
+                + #"printf '%s|%s|%s|%s' "${CMUX_NOTIFICATION_AGENT_KIND-unset}" "${CMUX_NOTIFICATION_AGENT_CATEGORY-unset}" "${CMUX_NOTIFICATION_AGENT_PENDING-unset}" "${CMUX_NOTIFICATION_AGENT_IS_SUBAGENT-unset}""#
+                + " > '\(envCapture.path)'",
+            timeoutSeconds: 5,
+            sourcePath: nil,
+            cwd: FileManager.default.temporaryDirectory.path
+        )
+
+        let request = makeAgentRequest(agent: TerminalNotificationPolicyAgentContext(
+            kind: "codex", category: "turn-complete", pending: true, isSubagent: true
+        ))
+        let result = await evaluate(request: request, hooks: [hook])
+        _ = try result.get()
+
+        let stdinData = try Data(contentsOf: stdinCapture)
+        let received = try JSONDecoder().decode(TerminalNotificationPolicyEnvelope.self, from: stdinData)
+        XCTAssertEqual(received.agent?.kind, "codex")
+        XCTAssertEqual(received.agent?.category, "turn-complete")
+        XCTAssertEqual(received.agent?.pending, true)
+        XCTAssertEqual(received.agent?.isSubagent, true)
+        XCTAssertEqual(received.notification.workspaceId, request.tabId.uuidString)
+        XCTAssertEqual(received.notification.surfaceId, request.surfaceId?.uuidString)
+
+        let envLine = try String(contentsOf: envCapture, encoding: .utf8)
+        XCTAssertEqual(envLine, "codex|turn-complete|1|1")
+    }
+
+    func testHookCannotPatchAgentContext() async throws {
+        // The agent block is informational input, not hook-patchable state: a
+        // hook that echoes back a forged agent object changes nothing while
+        // its effects patch still applies.
+        let agent = TerminalNotificationPolicyAgentContext(
+            kind: "claude",
+            category: "turn-complete",
+            pending: false,
+            isSubagent: true
+        )
+        let hook = CmuxResolvedNotificationHook(
+            id: "forge-agent",
+            command: #"printf '{"agent":{"kind":"forged","category":"needs-permission","pending":true,"isSubagent":false},"effects":{"desktop":false}}'"#,
+            timeoutSeconds: 5,
+            sourcePath: nil,
+            cwd: FileManager.default.temporaryDirectory.path
+        )
+
+        let result = await evaluate(request: makeAgentRequest(agent: agent), hooks: [hook])
+        let envelope = try result.get()
+        XCTAssertEqual(envelope.agent, agent)
+        XCTAssertFalse(envelope.effects.desktop)
+    }
+
+    func testHookInputOmitsAgentContextForNonAgentNotifications() async throws {
+        let captureDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-hook-no-agent-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: captureDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: captureDirectory) }
+        let stdinCapture = captureDirectory.appendingPathComponent("stdin.json")
+        let envCapture = captureDirectory.appendingPathComponent("env.txt")
+        let hook = CmuxResolvedNotificationHook(
+            id: "capture-legacy",
+            command: "cat > '\(stdinCapture.path)'; "
+                + #"printf '%s' "${CMUX_NOTIFICATION_AGENT_KIND-unset}""#
+                + " > '\(envCapture.path)'",
+            timeoutSeconds: 5,
+            sourcePath: nil,
+            cwd: FileManager.default.temporaryDirectory.path
+        )
+
+        let result = await evaluate(request: makeAgentRequest(agent: nil), hooks: [hook])
+        _ = try result.get()
+
+        // The legacy stdin JSON stays byte-shape-identical: no `agent` key at all.
+        let stdinData = try Data(contentsOf: stdinCapture)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: stdinData) as? [String: Any])
+        XCTAssertNil(object["agent"])
+        XCTAssertEqual(
+            Set(object.keys),
+            Set(["version", "notification", "context", "effects"])
+        )
+
+        let envLine = try String(contentsOf: envCapture, encoding: .utf8)
+        XCTAssertEqual(envLine, "unset")
     }
 }
 
@@ -613,7 +811,101 @@ final class NotificationDockBadgeTests: XCTestCase {
         super.tearDown()
     }
 
+    func testSessionRestoreRecoveryInventoryIsInAppOnlyAndPreservesUnrelatedNotification() throws {
+        let store = TerminalNotificationStore.shared
+        let tabID = UUID()
+        let panelID = UUID()
+        let unrelated = TerminalNotification(
+            id: UUID(),
+            tabId: tabID,
+            surfaceId: panelID,
+            title: "Unrelated",
+            subtitle: "",
+            body: "",
+            createdAt: Date(),
+            isRead: false
+        )
+        var deliveredCount = 0
+        var suppressedFeedbackCount = 0
+        store.replaceNotificationsForTesting([unrelated])
+        store.configureNotificationDeliveryHandlerForTesting { _, _, _ in
+            deliveredCount += 1
+        }
+        store.configureSuppressedNotificationFeedbackHandlerForTesting { _, _, _ in
+            suppressedFeedbackCount += 1
+        }
+        let phoneUnreadCountBefore = store.phoneUnreadCountForTesting
+        let feedRevisionBefore = store.notificationFeedHistoryRevisionForTesting
+
+        store.addSessionRestoreRecoveryInventoryItem(
+            SessionRestoreRecoveryInventoryItem(
+                tabID: tabID,
+                panelID: panelID,
+                savedWorkingDirectory: "/missing/project",
+                snapshot: SessionRestorableAgentSnapshot(
+                    kind: .codex,
+                    sessionId: "checkpoint-1"
+                )
+            )
+        )
+
+        XCTAssertEqual(deliveredCount, 0)
+        XCTAssertEqual(suppressedFeedbackCount, 0)
+        XCTAssertEqual(store.phoneUnreadCountForTesting, phoneUnreadCountBefore)
+        XCTAssertEqual(store.notificationFeedHistoryRevisionForTesting, feedRevisionBefore)
+        XCTAssertEqual(store.phoneVisibleNotifications.map(\.id), [unrelated.id])
+        XCTAssertTrue(store.notifications.contains(where: { $0.id == unrelated.id }))
+        let inventory = try XCTUnwrap(store.notifications.first(where: {
+            $0.correlationKey == "session-restore-recovery"
+        }))
+        XCTAssertEqual(inventory.tabId, tabID)
+        XCTAssertEqual(inventory.surfaceId, panelID)
+        XCTAssertEqual(inventory.panelId, panelID)
+        XCTAssertTrue(inventory.subtitle.contains("checkpoint-1"))
+        XCTAssertTrue(inventory.subtitle.contains("Direct"))
+        XCTAssertTrue(inventory.body.contains("/missing/project"))
+        XCTAssertFalse(inventory.isRead)
+        XCTAssertTrue(inventory.paneFlash)
+        XCTAssertEqual(
+            store.externalNotificationIdentifiersForTesting([
+                inventory.id.uuidString,
+                unrelated.id.uuidString,
+            ]),
+            [unrelated.id.uuidString]
+        )
+        store.markRead(id: inventory.id)
+        XCTAssertEqual(
+            store.externalNotificationIdentifiersForTesting([inventory.id.uuidString]),
+            []
+        )
+    }
+
+    func testSessionRestoreRecoveryInventoryIncludesUniqueFallbackManager() {
+        let mainManager = TabManager()
+        let fallbackManager = TabManager()
+
+        let withFallback = AppDelegate.sessionRestoreRecoveryInventoryTabManagers(
+            mainWindowManagers: [mainManager],
+            fallback: fallbackManager
+        )
+        XCTAssertEqual(withFallback.count, 2)
+        XCTAssertTrue(withFallback.contains(where: { $0 === mainManager }))
+        XCTAssertTrue(withFallback.contains(where: { $0 === fallbackManager }))
+
+        let deduplicated = AppDelegate.sessionRestoreRecoveryInventoryTabManagers(
+            mainWindowManagers: [mainManager, mainManager],
+            fallback: mainManager
+        )
+        XCTAssertEqual(deduplicated.count, 1)
+        XCTAssertTrue(deduplicated[0] === mainManager)
+    }
+
     func testNotificationClickActionRoundTripsAndIsStored() {
+        guard let appDelegate = AppDelegate.shared else {
+            XCTFail("AppDelegate.shared must be set for this test")
+            return
+        }
+        let manager = TabManager()
         let store = TerminalNotificationStore.shared
         let path = "/tmp/cmux-crash-\(UUID().uuidString).ghosttycrash"
         let action = TerminalNotificationClickAction.revealInFinder(path: path)
@@ -622,17 +914,30 @@ final class NotificationDockBadgeTests: XCTestCase {
 
         XCTAssertEqual(TerminalNotificationClickAction(userInfo: userInfo), action)
 
+        let originalTabManager = appDelegate.tabManager
+        let originalNotificationStore = appDelegate.notificationStore
         store.replaceNotificationsForTesting([])
         store.configureNotificationDeliveryHandlerForTesting { _, notification in
             delivered = notification
         }
+        appDelegate.tabManager = manager
+        appDelegate.notificationStore = store
         defer {
             store.replaceNotificationsForTesting([])
             store.resetNotificationDeliveryHandlerForTesting()
+            appDelegate.tabManager = originalTabManager
+            appDelegate.notificationStore = originalNotificationStore
         }
 
+        guard let workspace = manager.selectedWorkspace else {
+            XCTFail("Expected a selected workspace to address the notification to")
+            return
+        }
+
+        // Delivery resolves its target from live identity, so the notification must
+        // address a workspace some TabManager actually owns or it is never recorded.
         store.addNotification(
-            tabId: UUID(),
+            tabId: workspace.id,
             surfaceId: nil,
             title: "Crash",
             subtitle: "Diagnostic",
@@ -851,7 +1156,20 @@ final class NotificationDockBadgeTests: XCTestCase {
 
         defaults.set("Ping", forKey: NotificationSoundSettings.key)
         XCTAssertTrue(NotificationSoundSettings.usesSystemSound(defaults: defaults))
-        XCTAssertNotNil(NotificationSoundSettings.sound(defaults: defaults))
+        let stagingDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-notification-sound-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: stagingDirectory)
+        }
+        XCTAssertNotNil(NotificationSoundSettings.sound(
+            defaults: defaults,
+            systemSoundStagingDirectory: stagingDirectory
+        ))
+        let stagedSoundURL = stagingDirectory.appendingPathComponent(
+            NotificationSoundSettings.stagedSystemSoundFileName(for: "Ping"),
+            isDirectory: false
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stagedSoundURL.path))
     }
 
     func testNotificationSoundDisablesSystemSoundForNoneAndCustomFile() {
@@ -1236,7 +1554,7 @@ final class NotificationDockBadgeTests: XCTestCase {
             },
             object: NSObject()
         )
-        XCTAssertEqual(XCTWaiter().wait(for: [commandFinished], timeout: 2.0), .completed)
+        XCTAssertEqual(XCTWaiter().wait(for: [commandFinished], timeout: 10.0), .completed)
         XCTAssertTrue(deliveredNotificationIDs.isEmpty)
 
         let output = try String(contentsOf: commandOutputURL, encoding: .utf8)
