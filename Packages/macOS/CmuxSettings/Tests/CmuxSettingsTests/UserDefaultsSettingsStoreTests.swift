@@ -47,6 +47,21 @@ struct UserDefaultsSettingsStoreTests {
         #expect(reset == false)
     }
 
+    @Test func subrouterRecoveryDefaultsOffAndRoundTrips() async {
+        let (store, catalog) = makeStore()
+        #expect(await store.value(for: catalog.automation.subrouterRecovery) == false)
+        #expect(await store.value(for: catalog.automation.subrouterClaudeRecovery) == false)
+        #expect(await store.value(for: catalog.automation.subrouterCodexRecovery) == false)
+
+        await store.set(true, for: catalog.automation.subrouterRecovery)
+        await store.set(true, for: catalog.automation.subrouterClaudeRecovery)
+        await store.set(true, for: catalog.automation.subrouterCodexRecovery)
+
+        #expect(await store.value(for: catalog.automation.subrouterRecovery) == true)
+        #expect(await store.value(for: catalog.automation.subrouterClaudeRecovery) == true)
+        #expect(await store.value(for: catalog.automation.subrouterCodexRecovery) == true)
+    }
+
     @Test func autoNamingAgentDefaultsToAutoAndRoundTrips() async {
         let (store, catalog) = makeStore()
         // Default is "auto" (each session named by its own agent).

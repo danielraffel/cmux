@@ -47,6 +47,7 @@ final class HostSettingsActions: SettingsHostActions {
     init(configFileURL: URL) {
         self.configFileURL = configFileURL
         startObservingAppIconMode()
+        subrouterRecoveryConfigurationDidChange()
     }
 
     deinit {
@@ -96,6 +97,55 @@ final class HostSettingsActions: SettingsHostActions {
 
     func terminalAdaptiveDefaultThemeDidChange() {
         TerminalAdaptiveDefaultThemeSettings.notifyDidChange()
+    }
+
+    func subrouterRecoveryConfigurationDidChange() {
+        let defaults = UserDefaults.standard
+        let master = defaults.bool(forKey: "subrouterRecoveryEnabled")
+        let claudeEnabled = master && defaults.bool(forKey: "subrouterClaudeRecoveryEnabled")
+        let codexEnabled = master && defaults.bool(forKey: "subrouterCodexRecoveryEnabled")
+        let path = Self.subrouterExecutablePath()
+        guard let path else {
+            hostSettingsLogger.info("Subrouter recovery preference changed, but sr was not found on PATH")
+            return
+        }
+        let commands = [("claude", claudeEnabled), ("codex", codexEnabled)]
+        Task.detached {
+            for (agent, enabled) in commands {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: path)
+                process.arguments = ["wake", enabled ? "enable" : "disable", agent]
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    if process.terminationStatus != 0 {
+                        hostSettingsLogger.error("Subrouter wake configuration failed for \(agent, privacy: .public) with status \(process.terminationStatus, privacy: .public)")
+                    }
+                } catch {
+                    hostSettingsLogger.error("Subrouter wake configuration failed for \(agent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+    }
+
+    private static func subrouterExecutablePath() -> String? {
+        let pathEntries = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .flatMap { entry in
+                let directory = URL(fileURLWithPath: String(entry))
+                return [directory.appendingPathComponent("sr").path, directory.appendingPathComponent("subrouter").path]
+            }
+        let candidates = pathEntries + [
+            NSHomeDirectory() + "/.local/bin/sr",
+            NSHomeDirectory() + "/.local/bin/subrouter",
+            NSHomeDirectory() + "/bin/sr",
+            NSHomeDirectory() + "/bin/subrouter",
+            "/usr/local/bin/sr",
+            "/usr/local/bin/subrouter",
+            "/opt/homebrew/bin/sr",
+            "/opt/homebrew/bin/subrouter"
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
     func notifyShortcutSettingsDidChange() {

@@ -195,6 +195,9 @@ extension CmuxSettingsFileStore {
                     "kiroNotificationLevel": IntegrationsCatalogSection().kiroNotificationLevel.defaultValue,
                     "portBase": AutomationSettings.defaultPortBase,
                     "portRange": AutomationSettings.defaultPortRange,
+                    "subrouterRecovery": SettingCatalog().automation.subrouterRecovery.defaultValue,
+                    "subrouterClaudeRecovery": SettingCatalog().automation.subrouterClaudeRecovery.defaultValue,
+                    "subrouterCodexRecovery": SettingCatalog().automation.subrouterCodexRecovery.defaultValue,
                 ],
             ],
             [

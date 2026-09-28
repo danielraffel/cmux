@@ -110,5 +110,26 @@ public struct AutomationCatalogSection: SettingCatalogSection {
         userDefaultsKey: "cmuxPortRange"
     )
 
+    /// Enables Subrouter-managed recovery alarms for eligible agent sessions.
+    public let subrouterRecovery = DefaultsKey<Bool>(
+        id: "automation.subrouterRecovery",
+        defaultValue: false,
+        userDefaultsKey: "subrouterRecoveryEnabled"
+    )
+
+    /// Enables automatic Claude quota recovery through Subrouter.
+    public let subrouterClaudeRecovery = DefaultsKey<Bool>(
+        id: "automation.subrouterClaudeRecovery",
+        defaultValue: false,
+        userDefaultsKey: "subrouterClaudeRecoveryEnabled"
+    )
+
+    /// Enables automatic Codex quota and provider-capacity recovery through Subrouter.
+    public let subrouterCodexRecovery = DefaultsKey<Bool>(
+        id: "automation.subrouterCodexRecovery",
+        defaultValue: false,
+        userDefaultsKey: "subrouterCodexRecoveryEnabled"
+    )
+
     public init() {}
 }

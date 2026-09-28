@@ -339,6 +339,9 @@ enum AutomationSettingsFileMapping {
         .init(jsonKey: "geminiIntegration", defaultsKey: automation.geminiIntegration.userDefaultsKey),
         .init(jsonKey: "kiroIntegration", defaultsKey: automation.kiroIntegration.userDefaultsKey),
         .init(jsonKey: "workspaceAutoNaming", defaultsKey: automation.workspaceAutoNaming.userDefaultsKey),
+        .init(jsonKey: "subrouterRecovery", defaultsKey: automation.subrouterRecovery.userDefaultsKey),
+        .init(jsonKey: "subrouterClaudeRecovery", defaultsKey: automation.subrouterClaudeRecovery.userDefaultsKey),
+        .init(jsonKey: "subrouterCodexRecovery", defaultsKey: automation.subrouterCodexRecovery.userDefaultsKey),
     ]
 
     static let stringSettings: [SettingsFileStringMapping] = [

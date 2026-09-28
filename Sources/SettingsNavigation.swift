@@ -442,6 +442,7 @@ enum SettingsSearchIndex {
         setting(.automation, "socket-mode", String(localized: "settings.automation.socketMode", defaultValue: "Socket Control Mode"), "unix socket api access password auth"),
         setting(.automation, "socket-password", String(localized: "settings.automation.socketPassword", defaultValue: "Socket Password"), "socket auth credential"),
         setting(.automation, "claude-code", String(localized: "settings.automation.claudeCode", defaultValue: "Claude Code Integration"), "agent hooks notifications"),
+        setting(.automation, "subrouter-recovery", "Subrouter Auto-Resume", "subrouter sr quota recovery wake alarms Claude Codex provider capacity continue resume"),
         setting(.automation, "claude-path", String(localized: "settings.automation.claudeCode.customPath", defaultValue: "Claude Binary Path"), "custom claude executable"),
         setting(
             .automation,
@@ -595,6 +596,9 @@ enum SettingsSearchIndex {
         "automation.socketControlMode": settingID(for: .automation, idSuffix: "socket-mode"),
         "automation.socketPassword": settingID(for: .automation, idSuffix: "socket-password"),
         "automation.claudeCodeIntegration": settingID(for: .automation, idSuffix: "claude-code"),
+        "automation.subrouterRecovery": settingID(for: .automation, idSuffix: "subrouter-recovery"),
+        "automation.subrouterClaudeRecovery": settingID(for: .automation, idSuffix: "subrouter-recovery"),
+        "automation.subrouterCodexRecovery": settingID(for: .automation, idSuffix: "subrouter-recovery"),
         "automation.claudeBinaryPath": settingID(for: .automation, idSuffix: "claude-path"),
         "automation.workspaceAutoNaming": settingID(for: .automation, idSuffix: "workspace-auto-naming"),
         "automation.ripgrepBinaryPath": settingID(for: .automation, idSuffix: "ripgrep-path"),
