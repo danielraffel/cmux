@@ -171020,6 +171020,40 @@
         }
       }
     },
+    "settings.automation.subrouter.claude.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When Claude hits a pool quota limit, Subrouter waits for recovery and continues the original tab. If a goal is active, Claude continues working toward it."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claudeがプールのクォータ上限に達すると、Subrouterは回復を待って元のタブを続行します。目標がアクティブな場合、Claudeはその達成に向けた作業を続けます。"
+          }
+        }
+      }
+    },
+    "settings.automation.subrouter.codex.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When Codex hits an account quota limit or temporary provider-capacity issue, Subrouter waits for recovery and resumes the original tab. If a goal is active, Codex continues working toward it."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Codexがアカウントのクォータ上限または一時的なプロバイダー容量の問題に達すると、Subrouterは回復を待って元のタブを再開します。目標がアクティブな場合、Codexはその達成に向けた作業を続けます。"
+          }
+        }
+      }
+    },
     "settings.automation.cursor": {
       "extractionState": "manual",
       "localizations": {
