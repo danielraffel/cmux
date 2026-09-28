@@ -56,6 +56,10 @@ public protocol SettingsHostActions: AnyObject {
     /// Applies the current persisted control-socket configuration to the live server.
     func socketControlConfigurationDidChange()
 
+    /// Applies the persisted Subrouter recovery switches to the local `sr`
+    /// wake configuration when the Subrouter CLI is installed.
+    func subrouterRecoveryConfigurationDidChange()
+
     /// Live-reloads Ghostty after the adaptive-default-theme preference commits.
     func terminalAdaptiveDefaultThemeDidChange()
 
@@ -248,6 +252,7 @@ public struct CloudMachinesPlanSummary: Equatable, Sendable {
 }
 
 public extension SettingsHostActions {
+    func subrouterRecoveryConfigurationDidChange() {}
     /// Default no-op for previews and tests without a live control socket.
     func socketControlConfigurationDidChange() {}
 

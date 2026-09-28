@@ -1,5 +1,6 @@
 import CmuxFoundation
 import CmuxSettings
+import Foundation
 import SwiftUI
 
 /// Automation settings, including socket access, agent integrations, and port ranges.
@@ -25,6 +26,11 @@ public struct AutomationSection: View {
     @State private var kiroLevelModel: DefaultsValueModel<String>
     @State private var portBaseModel: DefaultsValueModel<Int>
     @State private var portRangeModel: DefaultsValueModel<Int>
+    @State private var subrouterRecoveryModel: DefaultsValueModel<Bool>
+    @State private var subrouterClaudeModel: DefaultsValueModel<Bool>
+    @State private var subrouterCodexModel: DefaultsValueModel<Bool>
+    @State private var subrouterInstalled = false
+    @State private var subrouterRefreshing = false
     @State private var socketPasswordDraft: String = ""
     @State private var socketPasswordStatus: SocketPasswordStatus?
     @State private var showOpenAccessConfirmation: Bool = false
@@ -74,6 +80,9 @@ public struct AutomationSection: View {
         _kiroLevelModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.integrations.kiroNotificationLevel))
         _portBaseModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.portBase))
         _portRangeModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.portRange))
+        _subrouterRecoveryModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.subrouterRecovery))
+        _subrouterClaudeModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.subrouterClaudeRecovery))
+        _subrouterCodexModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.subrouterCodexRecovery))
     }
 
     private static let columnWidth: CGFloat = 196
@@ -83,6 +92,7 @@ public struct AutomationSection: View {
             SettingsSectionHeader(String(localized: "settings.section.automation", defaultValue: "Automation"), section: .automation)
 
             socketControlCard
+            subrouterCard
             claudeCodeCard
             codexCard
             claudePathCard
@@ -124,7 +134,125 @@ public struct AutomationSection: View {
                 localized: "settings.automation.openAccess.dialog.message",
                 defaultValue: "This disables ancestry and password checks and opens the socket to all local users. Only enable when you understand the risk."
             ))
-        }.task { startSettingsObservation([socketPasswordModel, modeModel, claudeCodeModel, codexModel, claudePathModel, autoNamingModel, autoNamingAgentModel, autoNamingStatusModel, ripgrepPathModel, suppressSubagentModel, ampModel, cursorModel, geminiModel, kiroModel, kiroLevelModel, portBaseModel, portRangeModel]) }
+        }
+        .task {
+            startSettingsObservation([
+                socketPasswordModel, modeModel, claudeCodeModel, codexModel, claudePathModel,
+                autoNamingModel, autoNamingAgentModel, autoNamingStatusModel, ripgrepPathModel,
+                suppressSubagentModel, ampModel, cursorModel, geminiModel, kiroModel, kiroLevelModel,
+                portBaseModel, portRangeModel, subrouterRecoveryModel, subrouterClaudeModel, subrouterCodexModel
+            ])
+            refreshSubrouterAvailability()
+        }
+    }
+
+    @ViewBuilder
+    private var subrouterCard: some View {
+        let enabled = subrouterRecoveryModel.current
+        SettingsCard {
+            SettingsCardRow(
+                configurationReview: .json("automation.subrouterRecovery"),
+                "Subrouter auto-resume",
+                subtitle: "Automatically resume eligible Claude or Codex sessions after a temporary quota or provider-capacity failure."
+            ) {
+                HStack(spacing: 8) {
+                    Toggle("", isOn: Binding(get: { enabled }, set: {
+                        subrouterRecoveryModel.set($0)
+                        hostActions.subrouterRecoveryConfigurationDidChange()
+                    }))
+                        .labelsHidden()
+                        .controlSize(.small)
+                        .accessibilityIdentifier("SettingsSubrouterRecoveryToggle")
+                    Button(subrouterRefreshing ? "Checking…" : "Refresh") {
+                        refreshSubrouterAvailability()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(subrouterRefreshing)
+                }
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Image(systemName: subrouterInstalled ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(subrouterInstalled ? .green : .orange)
+                Text(subrouterInstalled
+                    ? "Subrouter is installed and available."
+                    : "Subrouter was not found on this Mac.")
+                    .cmuxFont(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            SettingsCardDivider()
+            subrouterRecoveryRow(
+                title: "Claude auto-resume",
+                subtitle: "When Claude runs out of pool quota, Subrouter waits for the reset and resumes the original tab using the safest available continue or resume action.",
+                model: subrouterClaudeModel,
+                enabled: enabled,
+                identifier: "SettingsSubrouterClaudeRecoveryToggle"
+            )
+            SettingsCardDivider()
+            subrouterRecoveryRow(
+                title: "Codex auto-resume",
+                subtitle: "When Codex runs out of account quota or its model provider is temporarily unavailable, Subrouter waits for recovery and resumes the original tab with continue or /goal resume when appropriate.",
+                model: subrouterCodexModel,
+                enabled: enabled,
+                identifier: "SettingsSubrouterCodexRecoveryToggle"
+            )
+            SettingsCardDivider()
+            SettingsCardNote("Subrouter watches quota resets and provider health, schedules bounded retry attempts, and decides when an account is usable again. cmux supplies the session and route context so the action is sent to the original tab.")
+            if !subrouterInstalled {
+                VStack(alignment: .leading, spacing: 5) {
+                    SettingsCardNote("Install Subrouter and make sure the `sr` command is on PATH, then choose Refresh. You must use Subrouter for these auto-resume options to do anything.")
+                    Link("Learn about Subrouter", destination: URL(string: "https://github.com/manaflow-ai/subrouter")!)
+                        .font(.caption)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 8)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func subrouterRecoveryRow(
+        title: String,
+        subtitle: String,
+        model: DefaultsValueModel<Bool>,
+        enabled: Bool,
+        identifier: String
+    ) -> some View {
+        SettingsCardRow(title, subtitle: subtitle) {
+            Toggle("", isOn: Binding(get: { model.current }, set: {
+                model.set($0)
+                hostActions.subrouterRecoveryConfigurationDidChange()
+            }))
+                .labelsHidden()
+                .controlSize(.small)
+                .disabled(!enabled)
+                .accessibilityIdentifier(identifier)
+        }
+    }
+
+    private func refreshSubrouterAvailability() {
+        guard !subrouterRefreshing else { return }
+        subrouterRefreshing = true
+        let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let candidates = path.split(separator: ":").flatMap { entry in
+            let directory = URL(fileURLWithPath: String(entry))
+            return [directory.appendingPathComponent("sr").path, directory.appendingPathComponent("subrouter").path]
+        }
+            + [
+                NSHomeDirectory() + "/.local/bin/sr",
+                NSHomeDirectory() + "/.local/bin/subrouter",
+                NSHomeDirectory() + "/bin/sr",
+                NSHomeDirectory() + "/bin/subrouter",
+                "/usr/local/bin/sr",
+                "/usr/local/bin/subrouter",
+                "/opt/homebrew/bin/sr",
+                "/opt/homebrew/bin/subrouter"
+            ]
+        subrouterInstalled = candidates.contains { FileManager.default.isExecutableFile(atPath: $0) }
+        subrouterRefreshing = false
     }
 
     @ViewBuilder

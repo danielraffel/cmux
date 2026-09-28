@@ -59,6 +59,7 @@ struct SettingsRowAnchorResolutionTests {
         "app.workspaceInheritWorkingDirectory",
         "automation.claudeBinaryPath",
         "automation.claudeCodeIntegration",
+        "automation.subrouterRecovery",
         "automation.cursorIntegration",
         "automation.geminiIntegration",
         "automation.portBase",
