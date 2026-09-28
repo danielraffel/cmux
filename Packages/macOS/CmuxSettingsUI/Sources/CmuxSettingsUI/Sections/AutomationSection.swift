@@ -155,21 +155,13 @@ public struct AutomationSection: View {
                 "Subrouter auto-resume",
                 subtitle: "Automatically resume eligible agent sessions after a temporary quota or provider-capacity failure."
             ) {
-                HStack(spacing: 8) {
-                    Toggle("", isOn: Binding(get: { enabled }, set: {
-                        subrouterRecoveryModel.set($0)
-                        hostActions.subrouterRecoveryConfigurationDidChange()
-                    }))
-                        .labelsHidden()
-                        .controlSize(.small)
-                        .accessibilityIdentifier("SettingsSubrouterRecoveryToggle")
-                    Button(subrouterRefreshing ? "Checking…" : "Refresh") {
-                        refreshSubrouterAvailability()
-                    }
-                    .buttonStyle(.bordered)
+                Toggle("", isOn: Binding(get: { enabled }, set: {
+                    subrouterRecoveryModel.set($0)
+                    hostActions.subrouterRecoveryConfigurationDidChange()
+                }))
+                    .labelsHidden()
                     .controlSize(.small)
-                    .disabled(subrouterRefreshing)
-                }
+                    .accessibilityIdentifier("SettingsSubrouterRecoveryToggle")
             }
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 Image(systemName: subrouterInstalled ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
@@ -179,6 +171,12 @@ public struct AutomationSection: View {
                     : "Subrouter was not found on this Mac.")
                     .cmuxFont(.caption)
                     .foregroundStyle(.secondary)
+                Button(subrouterRefreshing ? "Checking…" : "Refresh") {
+                    refreshSubrouterAvailability()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(subrouterRefreshing)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 14)
