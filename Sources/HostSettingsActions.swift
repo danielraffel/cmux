@@ -104,14 +104,20 @@ final class HostSettingsActions: SettingsHostActions {
         let master = defaults.bool(forKey: "subrouterRecoveryEnabled")
         let claudeEnabled = master && defaults.bool(forKey: "subrouterClaudeRecoveryEnabled")
         let codexEnabled = master && defaults.bool(forKey: "subrouterCodexRecoveryEnabled")
+        hostSettingsLogger.info(
+            "Subrouter auto-resume policy changed: master=\(master, privacy: .public), claude=\(claudeEnabled, privacy: .public), codex=\(codexEnabled, privacy: .public)"
+        )
         let path = Self.subrouterExecutablePath()
         guard let path else {
-            hostSettingsLogger.info("Subrouter recovery preference changed, but sr was not found on PATH")
+            hostSettingsLogger.error("Subrouter auto-resume policy could not be applied: sr executable was not found")
             return
         }
         let commands = [("claude", claudeEnabled), ("codex", codexEnabled)]
         Task.detached {
             for (agent, enabled) in commands {
+                hostSettingsLogger.info(
+                    "Applying Subrouter auto-resume policy: agent=\(agent, privacy: .public), enabled=\(enabled, privacy: .public)"
+                )
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: path)
                 process.arguments = ["wake", enabled ? "enable" : "disable", agent]
@@ -120,6 +126,10 @@ final class HostSettingsActions: SettingsHostActions {
                     process.waitUntilExit()
                     if process.terminationStatus != 0 {
                         hostSettingsLogger.error("Subrouter wake configuration failed for \(agent, privacy: .public) with status \(process.terminationStatus, privacy: .public)")
+                    } else {
+                        hostSettingsLogger.info(
+                            "Subrouter auto-resume policy applied: agent=\(agent, privacy: .public), enabled=\(enabled, privacy: .public)"
+                        )
                     }
                 } catch {
                     hostSettingsLogger.error("Subrouter wake configuration failed for \(agent, privacy: .public): \(error.localizedDescription, privacy: .public)")

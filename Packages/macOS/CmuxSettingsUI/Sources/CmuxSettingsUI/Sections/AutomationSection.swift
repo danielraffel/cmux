@@ -153,7 +153,7 @@ public struct AutomationSection: View {
             SettingsCardRow(
                 configurationReview: .json("automation.subrouterRecovery"),
                 "Subrouter auto-resume",
-                subtitle: "Automatically resume eligible Claude or Codex sessions after a temporary quota or provider-capacity failure."
+                subtitle: "Automatically resume eligible agent sessions after a temporary quota or provider-capacity failure."
             ) {
                 HStack(spacing: 8) {
                     Toggle("", isOn: Binding(get: { enabled }, set: {
@@ -221,7 +221,10 @@ public struct AutomationSection: View {
         enabled: Bool,
         identifier: String
     ) -> some View {
-        SettingsCardRow(title, subtitle: subtitle) {
+        let rowSubtitle = enabled
+            ? subtitle
+            : "Enable Subrouter auto-resume above before enabling this agent."
+        SettingsCardRow(title, subtitle: rowSubtitle) {
             Toggle("", isOn: Binding(get: { model.current }, set: {
                 model.set($0)
                 hostActions.subrouterRecoveryConfigurationDidChange()
