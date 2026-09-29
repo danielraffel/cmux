@@ -101,11 +101,10 @@ final class HostSettingsActions: SettingsHostActions {
 
     func subrouterRecoveryConfigurationDidChange() {
         let defaults = UserDefaults.standard
-        let master = defaults.bool(forKey: "subrouterRecoveryEnabled")
-        let claudeEnabled = master && defaults.bool(forKey: "subrouterClaudeRecoveryEnabled")
-        let codexEnabled = master && defaults.bool(forKey: "subrouterCodexRecoveryEnabled")
+        let claudeEnabled = defaults.bool(forKey: "subrouterClaudeRecoveryEnabled")
+        let codexEnabled = defaults.bool(forKey: "subrouterCodexRecoveryEnabled")
         hostSettingsLogger.info(
-            "Subrouter auto-resume policy changed: master=\(master, privacy: .public), claude=\(claudeEnabled, privacy: .public), codex=\(codexEnabled, privacy: .public)"
+            "Subrouter auto-resume policy changed: claude=\(claudeEnabled, privacy: .public), codex=\(codexEnabled, privacy: .public)"
         )
         let path = Self.subrouterExecutablePath()
         guard let path else {

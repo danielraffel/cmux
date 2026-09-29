@@ -26,7 +26,6 @@ public struct AutomationSection: View {
     @State private var kiroLevelModel: DefaultsValueModel<String>
     @State private var portBaseModel: DefaultsValueModel<Int>
     @State private var portRangeModel: DefaultsValueModel<Int>
-    @State private var subrouterRecoveryModel: DefaultsValueModel<Bool>
     @State private var subrouterClaudeModel: DefaultsValueModel<Bool>
     @State private var subrouterCodexModel: DefaultsValueModel<Bool>
     @State private var subrouterInstalled = false
@@ -80,7 +79,6 @@ public struct AutomationSection: View {
         _kiroLevelModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.integrations.kiroNotificationLevel))
         _portBaseModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.portBase))
         _portRangeModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.portRange))
-        _subrouterRecoveryModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.subrouterRecovery))
         _subrouterClaudeModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.subrouterClaudeRecovery))
         _subrouterCodexModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.subrouterCodexRecovery))
     }
@@ -140,7 +138,7 @@ public struct AutomationSection: View {
                 socketPasswordModel, modeModel, claudeCodeModel, codexModel, claudePathModel,
                 autoNamingModel, autoNamingAgentModel, autoNamingStatusModel, ripgrepPathModel,
                 suppressSubagentModel, ampModel, cursorModel, geminiModel, kiroModel, kiroLevelModel,
-                portBaseModel, portRangeModel, subrouterRecoveryModel, subrouterClaudeModel, subrouterCodexModel
+                portBaseModel, portRangeModel, subrouterClaudeModel, subrouterCodexModel
             ])
             refreshSubrouterAvailability()
         }
@@ -148,21 +146,7 @@ public struct AutomationSection: View {
 
     @ViewBuilder
     private var subrouterCard: some View {
-        let enabled = subrouterRecoveryModel.current
         SettingsCard {
-            SettingsCardRow(
-                configurationReview: .json("automation.subrouterRecovery"),
-                "Subrouter auto-resume",
-                subtitle: "Automatically resume eligible agent sessions after a temporary quota or provider-capacity failure."
-            ) {
-                Toggle("", isOn: Binding(get: { enabled }, set: {
-                    subrouterRecoveryModel.set($0)
-                    hostActions.subrouterRecoveryConfigurationDidChange()
-                }))
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .accessibilityIdentifier("SettingsSubrouterRecoveryToggle")
-            }
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 Image(systemName: subrouterInstalled ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     .foregroundStyle(subrouterInstalled ? .green : .orange)
@@ -184,21 +168,23 @@ public struct AutomationSection: View {
             SettingsCardDivider()
             subrouterRecoveryRow(
                 title: "Claude auto-resume",
-                subtitle: String(localized: "settings.automation.subrouter.claude.subtitle", defaultValue: "When Claude reaches a pool quota limit, Subrouter waits for recovery, then sends `continue` to the original tab. Claude's active goal state remains in effect."),
+                subtitle: String(localized: "settings.automation.subrouter.claude.subtitle", defaultValue: "When enabled, automatically resume your Claude session where you left off as soon as your Claude pool has quota again."),
                 model: subrouterClaudeModel,
-                enabled: enabled,
+                enabled: subrouterInstalled,
+                configurationPath: "automation.subrouterClaudeRecovery",
                 identifier: "SettingsSubrouterClaudeRecoveryToggle"
             )
             SettingsCardDivider()
             subrouterRecoveryRow(
                 title: "Codex auto-resume",
-                subtitle: String(localized: "settings.automation.subrouter.codex.subtitle", defaultValue: "When Codex reaches an account quota limit or temporary provider-capacity issue, Subrouter verifies recovery, then sends `/goal resume` to the original tab. Retries are bounded and back off after repeated capacity failures."),
+                subtitle: String(localized: "settings.automation.subrouter.codex.subtitle", defaultValue: "When enabled, automatically resume your Codex session where you left off as soon as your Codex pool has quota again. Also resumes after temporary model-capacity issues, with backoff when capacity remains unavailable."),
                 model: subrouterCodexModel,
-                enabled: enabled,
+                enabled: subrouterInstalled,
+                configurationPath: "automation.subrouterCodexRecovery",
                 identifier: "SettingsSubrouterCodexRecoveryToggle"
             )
             SettingsCardDivider()
-            SettingsCardNote("Subrouter watches quota resets and provider health, schedules bounded retry attempts, and decides when an account is usable again. cmux supplies the session and route context so the action is sent to the original tab.")
+            SettingsCardNote("Subrouter watches quota resets and provider health, schedules bounded retry attempts, and decides when an account is usable again. cmux supplies the session and route context so the appropriate resume action reaches the original tab.")
             if !subrouterInstalled {
                 VStack(alignment: .leading, spacing: 5) {
                     SettingsCardNote("Install Subrouter and make sure the `sr` command is on PATH, then choose Refresh. You must use Subrouter for these auto-resume options to do anything.")
@@ -217,15 +203,20 @@ public struct AutomationSection: View {
         subtitle: String,
         model: DefaultsValueModel<Bool>,
         enabled: Bool,
+        configurationPath: String,
         identifier: String
     ) -> some View {
         let rowSubtitle = enabled
             ? subtitle
-            : "Enable Subrouter auto-resume above before enabling this agent."
-        SettingsCardRow(title, subtitle: rowSubtitle) {
+            : "Install Subrouter and choose Refresh before enabling this agent."
+        SettingsCardRow(
+            configurationReview: .json(configurationPath),
+            title,
+            subtitle: rowSubtitle
+        ) {
             Toggle("", isOn: Binding(get: { model.current }, set: {
                 model.set($0)
-                hostActions.subrouterRecoveryConfigurationDidChange()
+                    hostActions.subrouterRecoveryConfigurationDidChange()
             }))
                 .labelsHidden()
                 .controlSize(.small)

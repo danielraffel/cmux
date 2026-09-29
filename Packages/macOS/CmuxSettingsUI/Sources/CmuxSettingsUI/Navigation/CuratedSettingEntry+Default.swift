@@ -21,7 +21,8 @@ extension Array where Element == CuratedSettingEntry {
             // Account / integrations
             .init(section: .account, id: "account", title: "Account", synonyms: "auth authentication login logout signin sign-in signout sign-out email user profile stack team"),
             .init(section: .automation, id: "claude-code", title: "Claude Code Integration", synonyms: "automation.claudeCodeIntegration claude code hooks agent integration status notifications"),
-            .init(section: .automation, id: "subrouter-recovery", title: "Subrouter Auto-Resume", synonyms: "automation.subrouterRecovery subrouter sr quota wake alarm Claude Codex provider capacity continue resume recovery"),
+            .init(section: .automation, id: "subrouter-claude-recovery", title: "Claude Auto-Resume", synonyms: "automation.subrouterClaudeRecovery subrouter sr quota wake alarm Claude continue resume recovery"),
+            .init(section: .automation, id: "subrouter-codex-recovery", title: "Codex Auto-Resume", synonyms: "automation.subrouterCodexRecovery subrouter sr quota wake alarm Codex provider capacity continue resume recovery"),
             .init(section: .automation, id: "claude-path", title: "Claude Binary Path", synonyms: "automation.claudeBinaryPath claude binary executable path cli command custom"),
             .init(section: .automation, id: "ripgrep-path", title: "Ripgrep Binary Path", synonyms: "automation.ripgrepBinaryPath ripgrep rg binary executable path search find nix custom"),
             .init(section: .automation, id: "subagent-notifications", title: "Suppress Subagent Notifications", synonyms: "automation.suppressSubagentNotifications subagent nested child agent codex claude hooks notifications"),
