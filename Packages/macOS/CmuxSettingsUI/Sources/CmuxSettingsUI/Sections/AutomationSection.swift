@@ -147,6 +147,15 @@ public struct AutomationSection: View {
     @ViewBuilder
     private var subrouterCard: some View {
         SettingsCard {
+            SettingsCardRow(
+                "Subrouter auto-resume",
+                subtitle: String(
+                    localized: "settings.automation.subrouter.header.subtitle",
+                    defaultValue: "Automatically resume eligible Claude or Codex sessions after quota returns; Codex also retries temporary model-capacity failures."
+                )
+            ) {
+                EmptyView()
+            }
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 Image(systemName: subrouterInstalled ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     .foregroundStyle(subrouterInstalled ? .green : .orange)
