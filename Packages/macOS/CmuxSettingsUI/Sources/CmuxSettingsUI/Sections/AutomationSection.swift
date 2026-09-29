@@ -184,7 +184,7 @@ public struct AutomationSection: View {
             SettingsCardDivider()
             subrouterRecoveryRow(
                 title: "Claude auto-resume",
-                subtitle: String(localized: "settings.automation.subrouter.claude.subtitle", defaultValue: "When Claude hits a pool quota limit, Subrouter waits for recovery and continues the original tab. If a goal is active, Claude continues working toward it."),
+                subtitle: String(localized: "settings.automation.subrouter.claude.subtitle", defaultValue: "When Claude reaches a pool quota limit, Subrouter waits for recovery, then sends `continue` to the original tab. Claude's active goal state remains in effect."),
                 model: subrouterClaudeModel,
                 enabled: enabled,
                 identifier: "SettingsSubrouterClaudeRecoveryToggle"
@@ -192,7 +192,7 @@ public struct AutomationSection: View {
             SettingsCardDivider()
             subrouterRecoveryRow(
                 title: "Codex auto-resume",
-                subtitle: String(localized: "settings.automation.subrouter.codex.subtitle", defaultValue: "When Codex hits an account quota limit or temporary provider-capacity issue, Subrouter waits for recovery and resumes the original tab. If a goal is active, Codex continues working toward it."),
+                subtitle: String(localized: "settings.automation.subrouter.codex.subtitle", defaultValue: "When Codex reaches an account quota limit or temporary provider-capacity issue, Subrouter verifies recovery, then sends `/goal resume` to the original tab. Retries are bounded and back off after repeated capacity failures."),
                 model: subrouterCodexModel,
                 enabled: enabled,
                 identifier: "SettingsSubrouterCodexRecoveryToggle"

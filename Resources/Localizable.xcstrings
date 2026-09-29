@@ -171026,13 +171026,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "When Claude hits a pool quota limit, Subrouter waits for recovery and continues the original tab. If a goal is active, Claude continues working toward it."
+            "value": "When Claude reaches a pool quota limit, Subrouter waits for recovery, then sends `continue` to the original tab. Claude's active goal state remains in effect."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Claudeがプールのクォータ上限に達すると、Subrouterは回復を待って元のタブを続行します。目標がアクティブな場合、Claudeはその達成に向けた作業を続けます。"
+            "value": "Claudeがプールのクォータ上限に達すると、Subrouterは回復を待ってから元のタブに`continue`を送信します。Claudeのアクティブな目標状態は維持されます。"
           }
         }
       }
@@ -171043,13 +171043,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "When Codex hits an account quota limit or temporary provider-capacity issue, Subrouter waits for recovery and resumes the original tab. If a goal is active, Codex continues working toward it."
+            "value": "When Codex reaches an account quota limit or temporary provider-capacity issue, Subrouter verifies recovery, then sends `/goal resume` to the original tab. Retries are bounded and back off after repeated capacity failures."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Codexがアカウントのクォータ上限または一時的なプロバイダー容量の問題に達すると、Subrouterは回復を待って元のタブを再開します。目標がアクティブな場合、Codexはその達成に向けた作業を続けます。"
+            "value": "Codexがアカウントのクォータ上限または一時的なプロバイダー容量の問題に達すると、Subrouterは回復を確認してから元のタブに`/goal resume`を送信します。再試行は上限付きで、容量問題が続く場合は間隔を広げます。"
           }
         }
       }

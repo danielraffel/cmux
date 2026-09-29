@@ -120,7 +120,7 @@ final class HostSettingsActions: SettingsHostActions {
                 )
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: path)
-                process.arguments = ["wake", enabled ? "enable" : "disable", agent]
+                process.arguments = ["auto-resume", enabled ? "enable" : "disable", agent]
                 do {
                     try process.run()
                     process.waitUntilExit()
