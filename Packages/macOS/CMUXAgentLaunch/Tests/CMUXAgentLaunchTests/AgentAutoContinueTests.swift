@@ -558,3 +558,57 @@ private final class ClaimCounter: @unchecked Sendable {
     var count: Int { lock.withLock { value } }
     func increment() { lock.withLock { value += 1 } }
 }
+
+@Suite("A sender that types the prompt claims only after delivery")
+struct AgentAutoContinueClaimTokenTests {
+    @Test("A claim token round-trips the interruption the prompt was built for")
+    func tokenRoundTrip() throws {
+        let interruption = AgentInterruption(
+            state: .midToolCall,
+            interruptedAt: AgentInterruptionReader.parseTimestamp("2026-10-13T10:00:01Z"),
+            pendingToolName: "exec",
+            fingerprint: "2026-10-13T10:00:01.000Z#120"
+        )
+        let token = AgentAutoContinueLedger.claimToken(for: interruption)
+        #expect(AgentAutoContinueLedger.interruption(fromClaimToken: token) == interruption)
+        #expect(AgentAutoContinueLedger.interruption(fromClaimToken: "not a token") == nil)
+    }
+
+    @Test("Dry run claims nothing; committing the token claims that interruption once")
+    func dryRunThenCommit() throws {
+        let home = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let rollout = "\(home)/.codex/sessions/2026/10/13/rollout-2026-10-13T10-00-00-\(Fixture.codexSession).jsonl"
+        try Fixture.write([
+            ["type": "session_meta", "timestamp": "2026-10-13T09:59:59.000Z",
+             "payload": ["id": Fixture.codexSession, "model_provider": "subrouter"]],
+            Fixture.codexEvent("task_started", at: "2026-10-13T10:00:00.000Z"),
+            Fixture.codexCall(id: "c1", name: "exec", at: "2026-10-13T10:00:01.000Z"),
+        ], to: rollout)
+        let ledger = AgentAutoContinueLedger(directory: "\(home)/ledger")
+        let service = AgentAutoContinueService(ledger: ledger, homeDirectory: home)
+        guard case .send(_, let seen) = service.decide(
+            kind: "codex", sessionID: Fixture.codexSession, environment: [:],
+            enabledSetting: true, sessionOverride: nil, reason: .quotaRecovered, ledgerMode: .dryRun
+        ) else {
+            Issue.record("dry run offered no prompt")
+            return
+        }
+        #expect(!ledger.isClaimed(kind: "codex", sessionID: Fixture.codexSession, interruption: seen))
+        // The delivered prompt lands in the transcript before the sender commits.
+        try Fixture.write([
+            ["type": "session_meta", "timestamp": "2026-10-13T09:59:59.000Z",
+             "payload": ["id": Fixture.codexSession, "model_provider": "subrouter"]],
+            Fixture.codexEvent("task_started", at: "2026-10-13T10:00:00.000Z"),
+            Fixture.codexCall(id: "c1", name: "exec", at: "2026-10-13T10:00:01.000Z"),
+            Fixture.codexEvent("task_started", at: "2026-10-13T11:00:00.000Z"),
+        ], to: rollout)
+        let token = AgentAutoContinueLedger.claimToken(for: seen)
+        let committed = try #require(AgentAutoContinueLedger.interruption(fromClaimToken: token))
+        #expect(ledger.claim(kind: "codex", sessionID: Fixture.codexSession, interruption: committed))
+        #expect(!ledger.claim(kind: "codex", sessionID: Fixture.codexSession, interruption: committed))
+        let record = try #require(ledger.claimRecord(kind: "codex", sessionID: Fixture.codexSession, interruption: committed))
+        #expect(record["state"] as? String == "midToolCall")
+        #expect(record["interrupted_at"] as? String == "2026-10-13T10:00:01Z")
+    }
+}

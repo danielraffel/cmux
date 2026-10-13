@@ -60,6 +60,25 @@ public struct AgentAutoContinueLedger: Sendable {
         return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
     }
 
+    /// An opaque token for `interruption`, handed to a sender that delivers
+    /// the prompt itself and claims only after a successful submit. Claiming
+    /// with the token records the interruption the prompt was built for, not
+    /// whatever the transcript says after the prompt landed.
+    public static func claimToken(for interruption: AgentInterruption) -> String {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return ((try? encoder.encode(interruption)) ?? Data()).base64EncodedString()
+    }
+
+    /// Decodes a token from ``claimToken(for:)``, or `nil` when malformed.
+    public static func interruption(fromClaimToken token: String) -> AgentInterruption? {
+        guard let data = Data(base64Encoded: token.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(AgentInterruption.self, from: data)
+    }
+
     /// Reads a claim back, for diagnostics and tests.
     public func claimRecord(kind: String, sessionID: String, interruption: AgentInterruption) -> [String: Any]? {
         let path = (directory as NSString).appendingPathComponent(entryName(

@@ -212,25 +212,39 @@ extension CMUXCLI {
     // MARK: Shared continue prompt
 
     /// `cmux agent-continue-prompt --kind <claude|codex> --session <id>
-    /// [--reason restored|quota|provider] [--dry-run]`
+    /// [--reason restored|quota|provider] [--dry-run [--json] | --commit <token>]`
     ///
     /// Prints the one shared continue prompt for an interrupted session and
     /// claims the interruption, so Subrouter's resumer and cmux never send it
-    /// twice. Exit status: 0 printed, 3 idle (never continue), 4 already sent,
-    /// 5 transcript not found or unreadable (send nothing).
+    /// twice. A sender that types the prompt itself asks with `--dry-run
+    /// --json`, which claims nothing and returns the prompt with a claim
+    /// token, then claims with `--commit <token>` only after the prompt was
+    /// submitted, so a failed delivery never consumes the interruption.
+    ///
+    /// Exit status: 0 printed (or claimed), 3 idle (never continue), 4 already
+    /// sent, 5 transcript not found or unreadable (send nothing).
     func runAgentContinuePromptCommand(commandArgs: [String]) throws {
         func value(_ name: String) -> String? {
             guard let index = commandArgs.firstIndex(of: name), index + 1 < commandArgs.count else { return nil }
             return commandArgs[index + 1]
         }
+        let usage = "usage: cmux agent-continue-prompt --kind <claude|codex> --session <id> [--reason restored|quota|provider] [--dry-run [--json] | --commit <token>]"
         guard let kind = value("--kind"), kind == "claude" || kind == "codex",
               let sessionID = value("--session") else {
-            throw CLIError(message: "usage: cmux agent-continue-prompt --kind <claude|codex> --session <id> [--reason restored|quota|provider] [--dry-run]")
+            throw CLIError(message: usage)
         }
         guard let reason = AgentContinuePrompt.Reason(rawValue: value("--reason") ?? "restored") else {
             throw CLIError(message: "agent-continue-prompt: --reason takes restored, quota or provider")
         }
-        let decision = AgentAutoContinueService(ledger: .standard(), homeDirectory: NSHomeDirectory()).decide(
+        let ledger = AgentAutoContinueLedger.standard()
+        if commandArgs.contains("--commit") {
+            guard let token = value("--commit"),
+                  let interruption = AgentAutoContinueLedger.interruption(fromClaimToken: token) else {
+                throw CLIError(message: usage)
+            }
+            exit(ledger.claim(kind: kind, sessionID: sessionID, interruption: interruption) ? 0 : 4)
+        }
+        let decision = AgentAutoContinueService(ledger: ledger, homeDirectory: NSHomeDirectory()).decide(
             kind: kind,
             sessionID: sessionID,
             environment: ProcessInfo.processInfo.environment,
@@ -240,8 +254,17 @@ extension CMUXCLI {
             ledgerMode: commandArgs.contains("--dry-run") ? .dryRun : .claim
         )
         switch decision {
-        case .send(let prompt, _):
-            print(prompt)
+        case .send(let prompt, let interruption):
+            if commandArgs.contains("--json") {
+                let object: [String: String] = [
+                    "prompt": prompt,
+                    "claim_token": AgentAutoContinueLedger.claimToken(for: interruption),
+                ]
+                let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+                print(String(decoding: data, as: UTF8.self))
+            } else {
+                print(prompt)
+            }
         case .idle:
             exit(3)
         case .alreadySent:

@@ -2,7 +2,7 @@ import Foundation
 
 /// What a session was doing when its process last stopped, read from the
 /// agent's own transcript.
-public struct AgentInterruption: Equatable, Sendable {
+public struct AgentInterruption: Equatable, Sendable, Codable {
     public enum State: String, Equatable, Sendable, Codable {
         /// The last turn finished, or the user stopped it. Nothing to continue.
         case idle
