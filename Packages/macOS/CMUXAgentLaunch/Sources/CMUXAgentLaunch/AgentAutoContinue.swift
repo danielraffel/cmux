@@ -153,8 +153,18 @@ public struct AgentAutoContinueService: Sendable {
         }
     }
 
-    /// Reads the session's transcript and decides. `claim` is `false` for a
-    /// dry run that must not consume the interruption.
+    /// How a decision uses the ledger.
+    public enum LedgerMode: Sendable, Equatable {
+        /// Claim the interruption; only the first claimer sends.
+        case claim
+        /// Report what would be sent without consuming the interruption.
+        case dryRun
+        /// The retry of a launch that already claimed this interruption and
+        /// never delivered its prompt: send only if the claim exists.
+        case carry
+    }
+
+    /// Reads the session's transcript and decides.
     public func decide(
         kind: String,
         sessionID: String,
@@ -162,7 +172,7 @@ public struct AgentAutoContinueService: Sendable {
         enabledSetting: Bool,
         sessionOverride: Bool?,
         reason: AgentContinuePrompt.Reason,
-        claim: Bool = true
+        ledgerMode: LedgerMode = .claim
     ) -> AgentAutoContinuePolicy.Decision {
         let interruption = AgentTranscriptLocator()
             .transcriptPath(kind: kind, sessionID: sessionID, environment: environment, homeDirectory: homeDirectory)
@@ -175,9 +185,14 @@ public struct AgentAutoContinueService: Sendable {
             interruption: interruption,
             reason: reason,
             claim: { interruption in
-                claim
-                    ? ledger.claim(kind: kind, sessionID: sessionID, interruption: interruption)
-                    : !ledger.isClaimed(kind: kind, sessionID: sessionID, interruption: interruption)
+                switch ledgerMode {
+                case .claim:
+                    return ledger.claim(kind: kind, sessionID: sessionID, interruption: interruption)
+                case .dryRun:
+                    return !ledger.isClaimed(kind: kind, sessionID: sessionID, interruption: interruption)
+                case .carry:
+                    return ledger.isClaimed(kind: kind, sessionID: sessionID, interruption: interruption)
+                }
             }
         )
     }

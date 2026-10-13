@@ -321,7 +321,7 @@ struct AgentAutoContinuePolicyTests {
             ledger: AgentAutoContinueLedger(directory: "\(home)/ledger"), homeDirectory: home
         )
         let dryRun = service.decide(kind: "codex", sessionID: Fixture.codexSession, environment: [:],
-                                    enabledSetting: true, sessionOverride: nil, reason: .restored, claim: false)
+                                    enabledSetting: true, sessionOverride: nil, reason: .restored, ledgerMode: .dryRun)
         let first = service.decide(kind: "codex", sessionID: Fixture.codexSession, environment: [:],
                                    enabledSetting: true, sessionOverride: nil, reason: .restored)
         let second = service.decide(kind: "codex", sessionID: Fixture.codexSession, environment: [:],
@@ -342,6 +342,53 @@ struct AgentAutoContinuePolicyTests {
         #expect(record["last_entry_was_open_tool_call"] as? Bool == true)
         #expect(record["pending_tool"] as? String == "exec")
         #expect(record["interrupted_at"] as? String == "2026-10-13T10:00:01Z")
+    }
+
+    @Test("A failed launch's retry carries the claimed prompt exactly once")
+    func retryCarriesClaimedPrompt() throws {
+        let home = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        try Fixture.write([
+            ["type": "session_meta", "timestamp": "2026-10-13T09:59:59.000Z",
+             "payload": ["id": Fixture.codexSession, "model_provider": "subrouter"]],
+            Fixture.codexEvent("task_started", at: "2026-10-13T10:00:00.000Z"),
+            Fixture.codexCall(id: "c1", name: "exec", at: "2026-10-13T10:00:01.000Z"),
+        ], to: "\(home)/.codex/sessions/2026/10/13/rollout-2026-10-13T10-00-00-\(Fixture.codexSession).jsonl")
+        let service = AgentAutoContinueService(
+            ledger: AgentAutoContinueLedger(directory: "\(home)/ledger"), homeDirectory: home
+        )
+        func decide(_ mode: AgentAutoContinueService.LedgerMode) -> AgentAutoContinuePolicy.Decision {
+            service.decide(kind: "codex", sessionID: Fixture.codexSession, environment: [:],
+                           enabledSetting: true, sessionOverride: nil, reason: .restored, ledgerMode: mode)
+        }
+        // A carry with no claim behind it is not a retry of a continued launch.
+        #expect(decide(.carry) == .alreadySent)
+        guard case .send(let firstPrompt, _) = decide(.claim) else {
+            Issue.record("the first attempt did not claim")
+            return
+        }
+        guard case .send(let carried, _) = decide(.carry) else {
+            Issue.record("the retry did not carry the claimed prompt")
+            return
+        }
+        #expect(carried == firstPrompt)
+        // A fresh claim for the same interruption still never sends again.
+        #expect(decide(.claim) == .alreadySent)
+        let claims = try FileManager.default.contentsOfDirectory(atPath: "\(home)/ledger")
+        #expect(claims.count == 1)
+    }
+
+    @Test("An unreadable transcript sends nothing and claims nothing")
+    func unknownTranscriptSendsNothing() throws {
+        let home = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let service = AgentAutoContinueService(
+            ledger: AgentAutoContinueLedger(directory: "\(home)/ledger"), homeDirectory: home
+        )
+        let decision = service.decide(kind: "claude", sessionID: Fixture.claudeSession, environment: [:],
+                                      enabledSetting: true, sessionOverride: nil, reason: .quotaRecovered)
+        #expect(decision == .unknown)
+        #expect(!FileManager.default.fileExists(atPath: "\(home)/ledger"))
     }
 
     @Test("The per-session override is read from the launch environment")

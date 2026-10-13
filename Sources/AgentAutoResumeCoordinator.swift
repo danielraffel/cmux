@@ -23,13 +23,10 @@ final class AgentAutoResumeCoordinator {
 
     /// The shared continue prompt for an interrupted turn: it asks the agent
     /// to check what actually finished before going on. `nil` when the
-    /// transcript shows the session idle, or this interruption was already
-    /// continued by cmux or Subrouter.
+    /// transcript cannot be found or shows the session idle, or this
+    /// interruption was already continued by cmux or Subrouter.
     static func resumePrompt(agent: String, sessionId: String?) -> String? {
-        let unknown = AgentInterruption(state: .midTurn, interruptedAt: nil, pendingToolName: nil, fingerprint: "")
-        guard let sessionId else {
-            return AgentContinuePrompt().text(for: unknown, reason: .providerRecovered)
-        }
+        guard let sessionId else { return nil }
         let decision = AgentAutoContinueService(ledger: .standard(), homeDirectory: NSHomeDirectory()).decide(
             kind: agent,
             sessionID: sessionId,
@@ -41,9 +38,7 @@ final class AgentAutoResumeCoordinator {
         switch decision {
         case .send(let prompt, _):
             return prompt
-        case .unknown:
-            return AgentContinuePrompt().text(for: unknown, reason: .providerRecovered)
-        case .idle, .alreadySent, .disabled:
+        case .unknown, .idle, .alreadySent, .disabled:
             return nil
         }
     }

@@ -84,7 +84,7 @@ extension CMUXCLI {
             enabledSetting: agentAutoContinueSetting(environment: processEnvironment),
             sessionOverride: AgentAutoContinueService.sessionOverride(in: environment),
             reason: .restored,
-            claim: !options.carriesContinuePrompt
+            ledgerMode: options.carriesContinuePrompt ? .carry : .claim
         )
         if case .send(let prompt, _) = decision { return prompt }
         return nil
@@ -216,8 +216,8 @@ extension CMUXCLI {
     ///
     /// Prints the one shared continue prompt for an interrupted session and
     /// claims the interruption, so Subrouter's resumer and cmux never send it
-    /// twice. Exit status: 0 printed, 3 idle (never continue), 4 already sent.
-    /// An unreadable transcript prints the prompt without interruption details.
+    /// twice. Exit status: 0 printed, 3 idle (never continue), 4 already sent,
+    /// 5 transcript not found or unreadable (send nothing).
     func runAgentContinuePromptCommand(commandArgs: [String]) throws {
         func value(_ name: String) -> String? {
             guard let index = commandArgs.firstIndex(of: name), index + 1 < commandArgs.count else { return nil }
@@ -237,7 +237,7 @@ extension CMUXCLI {
             enabledSetting: true,
             sessionOverride: nil,
             reason: reason,
-            claim: !commandArgs.contains("--dry-run")
+            ledgerMode: commandArgs.contains("--dry-run") ? .dryRun : .claim
         )
         switch decision {
         case .send(let prompt, _):
@@ -247,10 +247,9 @@ extension CMUXCLI {
         case .alreadySent:
             exit(4)
         case .unknown, .disabled:
-            // No readable transcript: still never a bare "continue". The
-            // sender's own once-only state guards this interruption.
-            let unknown = AgentInterruption(state: .midTurn, interruptedAt: nil, pendingToolName: nil, fingerprint: "")
-            print(AgentContinuePrompt().text(for: unknown, reason: reason) ?? "")
+            // No readable transcript: nothing is known about what was in
+            // flight and nothing could be claimed, so send nothing.
+            exit(5)
         }
     }
 }
