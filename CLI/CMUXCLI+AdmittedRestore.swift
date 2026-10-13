@@ -26,6 +26,14 @@ extension CMUXCLI {
                     ),
                     executable
                 )
+            case .subrouterCodexLauncherUnavailable(let sessionID):
+                message = String(
+                    format: String(
+                        localized: "cli.restore.notice.subrouterCodexLauncherUnavailable",
+                        defaultValue: "restore: Codex session %1$@ was created through Subrouter (model provider \"subrouter\"), so plain codex cannot resume it, and no Subrouter launcher (sr, subrouter or cx) is on PATH. Install Subrouter or add it to PATH, then run: sr codex resume %1$@"
+                    ),
+                    sessionID
+                )
             }
             FileHandle.standardError.write(Data((message + "\n").utf8))
         }

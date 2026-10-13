@@ -571275,6 +571275,17 @@
         }
       }
     },
+    "cli.restore.notice.subrouterCodexLauncherUnavailable": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "restore: Codex session %1$@ was created through Subrouter (model provider \"subrouter\"), so plain codex cannot resume it, and no Subrouter launcher (sr, subrouter or cx) is on PATH. Install Subrouter or add it to PATH, then run: sr codex resume %1$@"
+          }
+        }
+      }
+    },
     "settings.app.reorderOnNotification.mode.agentActivity": {
       "extractionState": "manual",
       "localizations": {
