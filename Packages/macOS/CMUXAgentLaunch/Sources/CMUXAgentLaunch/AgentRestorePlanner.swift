@@ -76,13 +76,25 @@ public struct AgentRestorePlanner: Sendable {
     ///   - incomingRequest: Structured restore or fork data. A Codex resume whose
     ///     launch record disagrees with its session's rollout is repaired first.
     ///   - ambientEnvironment: The current CLI environment inherited by the child.
+    ///   - route: Forces a Subrouter or plain resume; `.automatic` decides per session.
+    ///   - continuePrompt: Sent as the resumed session's first message.
     /// - Returns: A direct invocation, or `nil` when the record cannot be restored safely.
     public func invocation(
         for incomingRequest: AgentRestoreRequest,
-        ambientEnvironment: [String: String]
+        ambientEnvironment: [String: String],
+        route: AgentRestoreRoute = .automatic,
+        continuePrompt: String? = nil
     ) -> AgentRestoreInvocation? {
         let kind = normalizedKind(incomingRequest.kind)
-        let codexRouteRepair = CodexSessionRouteRepair().repair(
+        let routedRequest = AgentRestoreRouteOverride().applying(
+            route,
+            to: incomingRequest,
+            kind: kind,
+            isLauncherResolvable: { isResolvableOnRestorePath($0, ambientEnvironment: ambientEnvironment) }
+        )
+        let codexRouteRepair = route != .automatic
+            ? CodexSessionRouteRepair.Result(request: routedRequest, notices: [])
+            : CodexSessionRouteRepair().repair(
             incomingRequest,
             kind: kind,
             sessionModelProvider: {
@@ -264,6 +276,12 @@ public struct AgentRestorePlanner: Sendable {
             }
         }
         guard !routedArguments.isEmpty else { return nil }
+        // The continue prompt is the session's first message after resume:
+        // both `codex resume <id> [PROMPT]` and `claude --resume <id> [PROMPT]`
+        // take it as a trailing positional, and so do the Subrouter launchers.
+        if let continuePrompt, request.mode == .resumeAgent, kind == "codex" || kind == "claude" {
+            routedArguments.append(continuePrompt)
+        }
 
         return AgentRestoreInvocation(
             arguments: routedArguments,

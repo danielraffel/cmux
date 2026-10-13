@@ -90,6 +90,7 @@ extension CMUXCLI {
         execution: RestoreExecution,
         record: RestoreRecord,
         recordSessionID: String?,
+        watchPlan: RestoreWatchPlan? = nil,
         payload: [String: Any],
         bindingPayload: [String: Any]?,
         client: SocketClient,
@@ -141,6 +142,7 @@ extension CMUXCLI {
             case .invocation(let invocation):
                 client.close()
                 reportRestoreNotices(invocation.notices)
+                if let watchPlan { startRestoreWatch(watchPlan, environment: invocation.environment) }
                 try execRestoreInvocation(invocation, appliedWorkingDirectory: effectiveWorkingDirectory, admittedScope: claim)
             case .legacy(let command, let environment):
                 try execLegacyRestoreRecord(command, record: record, environment: environment, client: client)

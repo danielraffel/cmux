@@ -66,7 +66,9 @@ public struct CodexSessionModelProviderReader: Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func rolloutPath(sessionID: String, codexHome: String) -> String? {
+    /// Returns the rollout file for `sessionID` under `codexHome`, if any.
+    public func rolloutPath(sessionID: String, codexHome: String) -> String? {
+        guard Self.isWellFormedSessionID(sessionID) else { return nil }
         let suffix = "-\(sessionID.lowercased()).jsonl"
         let fileManager = FileManager.default
         var scanned = 0

@@ -71,6 +71,9 @@ public struct AgentLaunchEnvironmentPolicy: Sendable {
         // Selects the directory holding Claude Code's .credentials.json. A path, not a secret,
         // so restoring it keeps a restored agent on the account it launched with.
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        // Per-session opt-in ("1") or opt-out ("0") for continuing an
+        // interrupted session after cmux relaunches it.
+        "CMUX_AGENT_AUTO_CONTINUE",
         "CMUX_CUSTOM_CLAUDE_PATH",
         "CMUX_CUSTOM_AMP_PATH",
         "CMUX_CUSTOM_CODEX_PATH",

@@ -56,6 +56,7 @@ extension CMUXCLI {
         "__sidebar_footer_icon_balance",
         "__tmux-compat",
         "agent",
+        "agent-continue-prompt",
         "agent-hibernation",
         "ai-accounts",
         "automation",

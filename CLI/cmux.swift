@@ -8807,6 +8807,12 @@ struct CMUXCLI {
                 windowOverride: windowId
             )
 
+        case "__restore-watch":
+            try runRestoreWatchCommand(commandArgs: commandArgs, client: client)
+
+        case "agent-continue-prompt":
+            try runAgentContinuePromptCommand(commandArgs: commandArgs)
+
         case "restore", "fork":
             try await runContinuationCommand(
                 command: command,
