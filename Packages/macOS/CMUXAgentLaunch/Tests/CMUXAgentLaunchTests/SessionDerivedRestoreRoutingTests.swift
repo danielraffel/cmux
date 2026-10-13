@@ -203,6 +203,25 @@ struct SessionDerivedRestoreRoutingTests {
                 "\(invocation.arguments)")
     }
 
+    @Test("A proven sr route whose launcher is gone resumes a plain session directly")
+    func provenRouteWithMissingLauncherAndPlainRollout() throws {
+        let invocation = try #require(planner(executables: ["/shim/codex"], provider: "openai").invocation(
+            for: codexRequest(
+                arguments: [capturedCodex, "--yolo"] + staleRoutingArguments,
+                environment: [
+                    "SUBROUTER_CODEX_RESUME_COMMAND": "sr codex resume",
+                    "CMUX_AGENT_LAUNCH_SUBROUTER_CODEX_RESUME_COMMAND": "sr codex resume",
+                ]
+            ),
+            ambientEnvironment: ambientEnvironment
+        ))
+        #expect(invocation.arguments.first != "sr", "\(invocation.arguments)")
+        #expect(invocation.arguments.contains(codexSessionID))
+        expectNoSubrouterRouting(invocation.arguments, "proven route, launcher gone, plain rollout")
+        #expect(invocation.environment["SUBROUTER_CODEX_RESUME_COMMAND"] == nil)
+        #expect(invocation.notices.isEmpty)
+    }
+
     @Test("A proven route never replays the whole-table relay spelling")
     func provenRouteStripsWholeTableSpelling() throws {
         let invocation = try #require(planner(provider: "subrouter").invocation(

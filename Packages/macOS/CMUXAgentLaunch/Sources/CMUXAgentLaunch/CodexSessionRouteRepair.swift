@@ -23,8 +23,9 @@ import Foundation
 ///   from a record that does not prove a Subrouter route, so a plain resume
 ///   cannot be pointed at a stale relay.
 ///
-/// A record that already proves its route is kept unless its launcher is no
-/// longer on the restore `PATH` and another supported one is.
+/// A record that already proves its route is kept while its launcher is on the
+/// restore `PATH`. When it is not, a `subrouter` session switches to another
+/// Subrouter launcher, and any other session resumes directly.
 struct CodexSessionRouteRepair {
     struct Result {
         var request: AgentRestoreRequest
@@ -78,7 +79,9 @@ struct CodexSessionRouteRepair {
             return Result(request: request.replacingLaunchCommand(launch), notices: [])
         }
 
-        guard !proven else { return unchanged }
+        // Reaching here with a proven route means its launcher is gone. A
+        // session the rollout says was not created through Subrouter resumes
+        // directly instead of failing on the missing launcher.
         let arguments = router.removingPrivateRoutingArguments(from: launch.arguments)
         var environment = launch.environment
         environment?.removeValue(forKey: SubrouterCodexResumeRouting.environmentKey)
