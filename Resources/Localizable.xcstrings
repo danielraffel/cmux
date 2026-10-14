@@ -571278,10 +571278,58 @@
     "cli.restore.notice.subrouterCodexLauncherUnavailable": {
       "extractionState": "manual",
       "localizations": {
+        "ar": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "restore: تم إنشاء جلسة Codex %1$@ عبر Subrouter (موفّر النموذج \"subrouter\")، لذا لا يمكن لـ codex العادي استئنافها، ولا يوجد مشغّل Subrouter (sr أو subrouter أو cx) في PATH. ثبّت Subrouter أو أضفه إلى PATH، ثم شغّل: sr codex resume %1$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "restore: Die Codex-Sitzung %1$@ wurde über Subrouter erstellt (Modellanbieter \"subrouter\"), daher kann einfaches codex sie nicht fortsetzen, und kein Subrouter-Starter (sr, subrouter oder cx) ist im PATH. Installiere Subrouter oder füge es dem PATH hinzu und führe dann aus: sr codex resume %1$@"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "restore: Codex session %1$@ was created through Subrouter (model provider \"subrouter\"), so plain codex cannot resume it, and no Subrouter launcher (sr, subrouter or cx) is on PATH. Install Subrouter or add it to PATH, then run: sr codex resume %1$@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "restore: la sesión de Codex %1$@ se creó mediante Subrouter (proveedor de modelo \"subrouter\"), así que codex por sí solo no puede reanudarla, y no hay ningún lanzador de Subrouter (sr, subrouter o cx) en el PATH. Instala Subrouter o añádelo al PATH y luego ejecuta: sr codex resume %1$@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "restore : la session Codex %1$@ a été créée via Subrouter (fournisseur de modèle « subrouter »), donc codex seul ne peut pas la reprendre, et aucun lanceur Subrouter (sr, subrouter ou cx) n’est dans le PATH. Installez Subrouter ou ajoutez-le au PATH, puis lancez : sr codex resume %1$@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "restore: Codex セッション %1$@ は Subrouter 経由（モデルプロバイダー「subrouter」）で作成されたため、通常の codex では再開できません。また、PATH に Subrouter のランチャー（sr、subrouter、cx）がありません。Subrouter をインストールするか PATH に追加してから、次を実行してください: sr codex resume %1$@"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "restore: Codex 세션 %1$@은(는) Subrouter(모델 공급자 \"subrouter\")를 통해 생성되었으므로 일반 codex로는 재개할 수 없으며, PATH에 Subrouter 실행기(sr, subrouter 또는 cx)가 없습니다. Subrouter를 설치하거나 PATH에 추가한 다음 실행하세요: sr codex resume %1$@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "restore：Codex 会话 %1$@ 是通过 Subrouter 创建的（模型提供方为“subrouter”），因此普通 codex 无法恢复它，且 PATH 中没有 Subrouter 启动器（sr、subrouter 或 cx）。请安装 Subrouter 或将其加入 PATH，然后运行：sr codex resume %1$@"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "restore：Codex 工作階段 %1$@ 是透過 Subrouter 建立的（模型提供者為「subrouter」），因此一般的 codex 無法繼續它，且 PATH 中沒有 Subrouter 啟動器（sr、subrouter 或 cx）。請安裝 Subrouter 或將其加入 PATH，然後執行：sr codex resume %1$@"
           }
         }
       }
