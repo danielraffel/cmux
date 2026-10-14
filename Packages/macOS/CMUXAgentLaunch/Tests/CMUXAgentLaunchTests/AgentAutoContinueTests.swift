@@ -378,6 +378,30 @@ struct AgentAutoContinuePolicyTests {
         #expect(claims.count == 1)
     }
 
+    @Test("A dry run after a claim reports already sent, so a typing sender never duplicates")
+    func dryRunAfterClaimIsAlreadySent() throws {
+        let home = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        try Fixture.write([
+            ["type": "session_meta", "timestamp": "2026-10-13T09:59:59.000Z",
+             "payload": ["id": Fixture.codexSession, "model_provider": "subrouter"]],
+            Fixture.codexEvent("task_started", at: "2026-10-13T10:00:00.000Z"),
+            Fixture.codexCall(id: "c1", name: "exec", at: "2026-10-13T10:00:01.000Z"),
+        ], to: "\(home)/.codex/sessions/2026/10/13/rollout-2026-10-13T10-00-00-\(Fixture.codexSession).jsonl")
+        let service = AgentAutoContinueService(
+            ledger: AgentAutoContinueLedger(directory: "\(home)/ledger"), homeDirectory: home
+        )
+        func decide(_ mode: AgentAutoContinueService.LedgerMode) -> AgentAutoContinuePolicy.Decision {
+            service.decide(kind: "codex", sessionID: Fixture.codexSession, environment: [:],
+                           enabledSetting: true, sessionOverride: nil, reason: .quotaRecovered, ledgerMode: mode)
+        }
+        guard case .send = decide(.claim) else {
+            Issue.record("the claim did not send")
+            return
+        }
+        #expect(decide(.dryRun) == .alreadySent)
+    }
+
     @Test("An unreadable transcript sends nothing and claims nothing")
     func unknownTranscriptSendsNothing() throws {
         let home = try Fixture.temporaryDirectory()
