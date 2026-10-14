@@ -16,6 +16,7 @@ public struct AgentRestorePlanner: Sendable {
     private let isExecutableFile: @Sendable (String) -> Bool
     private let isReadableFile: @Sendable (String) -> Bool
     private let externalLaunchers: AgentExternalLauncherRegistry
+    private let codexSessionModelProvider: @Sendable (_ sessionID: String, _ codexHome: String) -> String?
 
     /// Creates a restore planner.
     ///
@@ -23,14 +24,19 @@ public struct AgentRestorePlanner: Sendable {
     ///   - isExecutableFile: Executable-path lookup used for optional wrapper shims.
     ///   - isReadableFile: Readable-file lookup used to remove stale Claude settings paths.
     ///   - externalLaunchers: User-declared launchers re-supplied around a resumed agent.
+    ///   - codexSessionModelProvider: Reads the model provider a Codex session's
+    ///     rollout records, given the session id and the resolved Codex home.
     public init(
         isExecutableFile: @escaping @Sendable (String) -> Bool,
         isReadableFile: @escaping @Sendable (String) -> Bool = AgentRestoreReadableFileResolver().isReadableFile(atPath:),
-        externalLaunchers: AgentExternalLauncherRegistry = .empty
+        externalLaunchers: AgentExternalLauncherRegistry = .empty,
+        codexSessionModelProvider: @escaping @Sendable (_ sessionID: String, _ codexHome: String) -> String? =
+            CodexSessionModelProviderReader().modelProvider(sessionID:codexHome:)
     ) {
         self.isExecutableFile = isExecutableFile
         self.isReadableFile = isReadableFile
         self.externalLaunchers = externalLaunchers
+        self.codexSessionModelProvider = codexSessionModelProvider
     }
 
     /// Creates a restore planner backed by an injected executable-file resolver.
@@ -67,14 +73,40 @@ public struct AgentRestorePlanner: Sendable {
     /// Produces the final direct process invocation for a persisted restore or fork request.
     ///
     /// - Parameters:
-    ///   - request: Structured restore or fork data.
+    ///   - incomingRequest: Structured restore or fork data. A Codex resume whose
+    ///     launch record disagrees with its session's rollout is repaired first.
     ///   - ambientEnvironment: The current CLI environment inherited by the child.
+    ///   - route: Forces a Subrouter or plain resume; `.automatic` decides per session.
+    ///   - continuePrompt: Sent as the resumed session's first message.
     /// - Returns: A direct invocation, or `nil` when the record cannot be restored safely.
     public func invocation(
-        for request: AgentRestoreRequest,
-        ambientEnvironment: [String: String]
+        for incomingRequest: AgentRestoreRequest,
+        ambientEnvironment: [String: String],
+        route: AgentRestoreRoute = .automatic,
+        continuePrompt: String? = nil
     ) -> AgentRestoreInvocation? {
-        let kind = normalizedKind(request.kind)
+        let kind = normalizedKind(incomingRequest.kind)
+        let routedRequest = AgentRestoreRouteOverride().applying(
+            route,
+            to: incomingRequest,
+            kind: kind,
+            isLauncherResolvable: { isResolvableOnRestorePath($0, ambientEnvironment: ambientEnvironment) }
+        )
+        let codexRouteRepair = route != .automatic
+            ? CodexSessionRouteRepair.Result(request: routedRequest, notices: [])
+            : CodexSessionRouteRepair().repair(
+            incomingRequest,
+            kind: kind,
+            sessionModelProvider: {
+                guard let sessionID = normalized(incomingRequest.checkpointID) else { return nil }
+                return codexSessionModelProvider(
+                    sessionID,
+                    codexHomeForSessionLookup(incomingRequest, ambientEnvironment: ambientEnvironment)
+                )
+            },
+            isLauncherResolvable: { isResolvableOnRestorePath($0, ambientEnvironment: ambientEnvironment) }
+        )
+        let request = codexRouteRepair.request
         // A rejected capture is never recoverable for managed OMP restore or
         // fork. Do this before planning argv: an app-prepared absolute argv
         // must not turn a rejected capture into a fresh-looking launch record.
@@ -244,6 +276,12 @@ public struct AgentRestorePlanner: Sendable {
             }
         }
         guard !routedArguments.isEmpty else { return nil }
+        // The continue prompt is the session's first message after resume:
+        // both `codex resume <id> [PROMPT]` and `claude --resume <id> [PROMPT]`
+        // take it as a trailing positional, and so do the Subrouter launchers.
+        if let continuePrompt, request.mode == .resumeAgent, kind == "codex" || kind == "claude" {
+            routedArguments.append(continuePrompt)
+        }
 
         return AgentRestoreInvocation(
             arguments: routedArguments,
@@ -251,9 +289,26 @@ public struct AgentRestorePlanner: Sendable {
             environment: environment,
             preflightInvocations: preflights,
             codexResumeSessionID: kind == "codex" && request.mode == .resumeAgent ? normalized(request.checkpointID) : nil,
-            notices: routedClaudeLaunch?.unavailableExecutable.map {
+            notices: codexRouteRepair.notices + (routedClaudeLaunch?.unavailableExecutable.map {
                 [.routedLauncherUnavailable(executable: $0)]
-            } ?? []
+            } ?? [])
+        )
+    }
+
+    /// The Codex home a session's rollout lives under: launch metadata first,
+    /// then the restoring process, matching the home the resumed Codex uses.
+    private func codexHomeForSessionLookup(
+        _ request: AgentRestoreRequest,
+        ambientEnvironment: [String: String]
+    ) -> String {
+        var captured = request.launchCommand?.environment ?? [:]
+        captured.merge(request.environment) { _, binding in binding }
+        return CodexHomeResolver().resolve(
+            launchEnvironment: captured,
+            launchWorkingDirectory: normalized(request.launchCommand?.workingDirectory)
+                ?? normalized(request.workingDirectory),
+            launchVerificationHome: request.launchCommand?.verificationHome,
+            ambientEnvironment: ambientEnvironment
         )
     }
 

@@ -75,6 +75,7 @@ Environment:
 | `browser-status` | Print whether cmux browser creation and link interception are enabled. |
 | `socket-status` | Print effective automation socket mode and managed source without connecting to the socket; `--json` also reports configured mode, forced-value status, and socket-path observation (`live_enforcement` is intentionally `not_observed`). Works when the listener is off or cmux is not running. |
 | `agent-hibernation` | Enable or disable routine Agent Hibernation. |
+| `agent-continue-prompt` | Print the shared continue prompt for an interrupted Claude or Codex session (`--kind`, `--session`, `--reason restored\|quota\|provider`) and claim the interruption so it is continued at most once. `--dry-run [--json]` claims nothing and returns the prompt with a claim token; `--commit <token>` claims after delivery. Exits 3 when the session is idle, 4 when already continued, 5 when the transcript cannot be read. Works without a running cmux or socket. |
 | `restore` | Replace the CLI with a process restored from structured surface state. |
 | `fork` | Replace the CLI with a provider fork process restored from structured surface state. |
 | `restore-session` | Restore the previously saved cmux session; `--from <channel\|path>` reopens another install's saved session (full trust) or an exported file (untrusted: no automatic resume of custom commands, SSH, or environment from the file) as additional windows, and `--export <path> [--force]` writes this install's saved session to a file. Both require cmux to be running. |
@@ -244,6 +245,7 @@ Environment:
 | `__sidebar_footer_icon_balance` | Internal debug verb that opens the sidebar footer icon balance window and prints `OK`. Present in debug builds only; a release build reports an unknown command. |
 | `__internal_flags` | Internal debug verb that opens the app's internal flags window and prints `OK`. It does not print the flag state to stdout. |
 | `__restore-lease-watch` | Internal watcher that takes one process id and exits when that process does, releasing the agent restore launch lease. Exits 64 without a usable pid. |
+| `__restore-watch` | Internal watcher a restore starts right before it execs the agent. Takes `--pid`, `--kind`, `--session`, `--surface`, `--attempt`, `--route`, `--started` and optional `--fingerprint` and `--continue-carry`. If the agent exits within the grace period without writing to its transcript, it types one retry through the other route into the surface, then prints the fix commands after a second failure. Never run by hand. |
 | `__sigpipe-probe` | Internal probe that re-runs the CLI to check SIGPIPE disposition; the optional first argument selects the mode (`spawn` by default). |
 | `__sigpipe-stdin-pipe-probe` | Internal probe that writes 1 MiB to a shell which closes stdin, checking that a broken input pipe does not kill the CLI. Prints `ok`. |
 | `__sigpipe-inspect` | Internal probe printing this process's SIGPIPE disposition as JSON, to stdout or to `--out <path>`. |

@@ -26,6 +26,14 @@ extension CMUXCLI {
                     ),
                     executable
                 )
+            case .subrouterCodexLauncherUnavailable(let sessionID):
+                message = String(
+                    format: String(
+                        localized: "cli.restore.notice.subrouterCodexLauncherUnavailable",
+                        defaultValue: "restore: Codex session %1$@ was created through Subrouter (model provider \"subrouter\"), so plain codex cannot resume it, and no Subrouter launcher (sr, subrouter or cx) is on PATH. Install Subrouter or add it to PATH, then run: sr codex resume %1$@"
+                    ),
+                    sessionID
+                )
             }
             FileHandle.standardError.write(Data((message + "\n").utf8))
         }
@@ -82,6 +90,7 @@ extension CMUXCLI {
         execution: RestoreExecution,
         record: RestoreRecord,
         recordSessionID: String?,
+        watchPlan: RestoreWatchPlan? = nil,
         payload: [String: Any],
         bindingPayload: [String: Any]?,
         client: SocketClient,
@@ -133,6 +142,7 @@ extension CMUXCLI {
             case .invocation(let invocation):
                 client.close()
                 reportRestoreNotices(invocation.notices)
+                if let watchPlan { startRestoreWatch(watchPlan, environment: invocation.environment) }
                 try execRestoreInvocation(invocation, appliedWorkingDirectory: effectiveWorkingDirectory, admittedScope: claim)
             case .legacy(let command, let environment):
                 try execLegacyRestoreRecord(command, record: record, environment: environment, client: client)

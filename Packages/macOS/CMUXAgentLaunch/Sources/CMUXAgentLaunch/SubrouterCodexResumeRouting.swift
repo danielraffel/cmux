@@ -141,6 +141,41 @@ public struct SubrouterCodexResumeRouting: Sendable, Equatable {
         return retained
     }
 
+    /// The launcher programs whose `codex resume` subcommand accepts a session id,
+    /// in the order a restore prefers them when the launch record names none.
+    static let supportedLaunchers = ["sr", "subrouter", "cx"]
+
+    /// Returns the launcher (`sr`, `subrouter`, `cx`) named by the record's
+    /// agreeing marker pair, or `nil` when the record does not carry one.
+    func launchBoundLauncher(in environment: [String: String]?) -> String? {
+        capturedLaunchBoundMarker(in: environment)?
+            .split(separator: " ")
+            .first
+            .map(String.init)
+    }
+
+    /// The agreeing marker pair a restore writes into a launch record that
+    /// lost its routing evidence but whose session proves it was routed.
+    func markerEnvironment(launcher: String) -> [String: String]? {
+        guard let marker = canonicalMarker("\(launcher) codex resume") else { return nil }
+        return [
+            Self.environmentKey: marker,
+            Self.launchBoundEnvironmentKey: marker,
+        ]
+    }
+
+    /// Returns `arguments` with an effective `model_provider=subrouter`, adding
+    /// the canonical proof before any `--` terminator when it is missing.
+    func argumentsProvingSubrouterProvider(_ arguments: [String]) -> [String] {
+        if launchArgumentsContainSubrouterProvider(arguments) {
+            return arguments
+        }
+        var proved = arguments
+        let insertionIndex = proved.firstIndex(of: "--") ?? proved.endIndex
+        proved.insert(contentsOf: ["-c", "model_provider=subrouter"], at: insertionIndex)
+        return proved
+    }
+
     func removingRoutingArguments(from arguments: [String]) -> [String] {
         var selected: [String] = []
         var index = 0
@@ -245,7 +280,9 @@ public struct SubrouterCodexResumeRouting: Sendable, Equatable {
         let parts = rawValue.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
         guard parts.count == 2 else { return false }
         let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
-        return key == "model_provider" || key.hasPrefix("model_providers.subrouter.")
+        return key == "model_provider"
+            || key == "model_providers.subrouter"
+            || key.hasPrefix("model_providers.subrouter.")
     }
 
     private func isPrivateSubrouterRoutingAssignment(_ rawValue: String) -> Bool {
@@ -254,9 +291,10 @@ public struct SubrouterCodexResumeRouting: Sendable, Equatable {
         }
         let parts = rawValue.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
         guard parts.count == 2 else { return false }
-        return parts[0]
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .hasPrefix("model_providers.subrouter.")
+        let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+        // The whole-table spelling carries the same per-launch relay URL as
+        // the dotted keys, so it is private for the same reason.
+        return key == "model_providers.subrouter" || key.hasPrefix("model_providers.subrouter.")
     }
 
     private func sanitizedRoutingValue(key: String, value: String?) -> String? {

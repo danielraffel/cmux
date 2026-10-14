@@ -15,7 +15,8 @@ extension CMUXCLI {
         client: SocketClient,
         processEnvironment: [String: String]
     ) async throws {
-        let selector = try restoreSelector(commandArgs)
+        let (routeOptions, selectorArguments) = try restoreRouteOptions(commandArgs)
+        let selector = try restoreSelector(selectorArguments)
         let workingDirectoryBeforeRestore = FileManager.default.currentDirectoryPath
         let surfaceID = try continuationSurfaceID(
             for: selector,
@@ -120,6 +121,7 @@ extension CMUXCLI {
             }
         let legacyOnly = record.launchCommand == nil && record.preparedArguments == nil && record.legacyCommand != nil
         let invocation: AgentRestoreInvocation?
+        var continuePrompt: String?
         if legacyOnly {
             invocation = nil
         } else {
@@ -172,7 +174,15 @@ extension CMUXCLI {
                     )
                 )
             }
-            invocation = planner.invocation(for: request, ambientEnvironment: processEnvironment)
+            continuePrompt = restoreContinuePrompt(
+                record: record, options: routeOptions, processEnvironment: processEnvironment
+            )
+            invocation = planner.invocation(
+                for: request,
+                ambientEnvironment: processEnvironment,
+                route: routeOptions.route,
+                continuePrompt: continuePrompt
+            )
         }
         let execution: RestoreExecution
         if let invocation {
@@ -183,8 +193,15 @@ extension CMUXCLI {
                 workingDirectory: effectiveWorkingDirectory
             )
         }
+        let watchPlan = invocation.flatMap {
+            restoreWatchPlan(
+                record: record, invocation: $0, options: routeOptions, surfaceID: surfaceID,
+                continuePrompt: continuePrompt
+            )
+        }
         try runAdmittedRestore(
             execution: execution, record: record, recordSessionID: surfaceRecordCheckpointID,
+            watchPlan: watchPlan,
             payload: payload, bindingPayload: bindingPayload, client: client,
             surfaceID: surfaceID, workspaceID: payload["workspace_id"] as? String ?? processEnvironment["CMUX_WORKSPACE_ID"],
             effectiveWorkingDirectory: effectiveWorkingDirectory,

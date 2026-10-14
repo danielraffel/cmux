@@ -1,3 +1,4 @@
+import CMUXAgentLaunch
 import CmuxAgentJournal
 import CMUXMobileCore
 import CmuxSettings
@@ -19,7 +20,28 @@ final class AgentAutoResumeCoordinator {
 
     /// Sidebar status key of the "Auto-resumed ×N" marker.
     static let statusKey = "agent_auto_resume"
-    static let resumePrompt = "continue"
+
+    /// The shared continue prompt for an interrupted turn: it asks the agent
+    /// to check what actually finished before going on. `nil` when the
+    /// transcript cannot be found or shows the session idle, or this
+    /// interruption was already continued by cmux or Subrouter.
+    static func resumePrompt(agent: String, sessionId: String?) -> String? {
+        guard let sessionId else { return nil }
+        let decision = AgentAutoContinueService(ledger: .standard(), homeDirectory: NSHomeDirectory()).decide(
+            kind: agent,
+            sessionID: sessionId,
+            environment: ProcessInfo.processInfo.environment,
+            enabledSetting: true,
+            sessionOverride: nil,
+            reason: .providerRecovered
+        )
+        switch decision {
+        case .send(let prompt, _):
+            return prompt
+        case .unknown, .idle, .alreadySent, .disabled:
+            return nil
+        }
+    }
 
     private var tracker = AgentAutoResumeTracker()
     private var timers: [String: Task<Void, Never>] = [:]
@@ -119,7 +141,7 @@ final class AgentAutoResumeCoordinator {
             return
         }
         let terminal = target.terminal
-        guard let input = resumeInput(for: terminal, agent: agent) else {
+        guard let input = resumeInput(for: terminal, agent: agent, sessionId: sessionId) else {
             tracker.abandon(surfaceId: surfaceId, token: token)
             return
         }
@@ -179,14 +201,14 @@ final class AgentAutoResumeCoordinator {
         case codexResumePicker
     }
 
-    private func resumeInput(for terminal: TerminalPanel, agent: String) -> ResumeInput? {
+    private func resumeInput(for terminal: TerminalPanel, agent: String, sessionId: String?) -> ResumeInput? {
         switch screenState(for: terminal.surface) {
         case .codexGoalResume where agent == "codex":
             return .text("/goal resume")
         case .codexResumePicker where agent == "codex":
             return .returnKey
         case .emptyPrompt:
-            return .text(Self.resumePrompt)
+            return Self.resumePrompt(agent: agent, sessionId: sessionId).map(ResumeInput.text)
         case .unknown, .draft, .dialog, .codexGoalResume, .codexResumePicker:
             return nil
         }
