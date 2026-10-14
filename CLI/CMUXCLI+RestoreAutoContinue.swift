@@ -223,7 +223,9 @@ extension CMUXCLI {
     ///
     /// Exit status: 0 printed (or claimed), 3 idle (never continue), 4 already
     /// sent, 5 transcript not found or unreadable (send nothing).
-    func runAgentContinuePromptCommand(commandArgs: [String]) throws {
+    /// `--json` is a global CLI flag, so the dispatcher removes it from
+    /// `commandArgs` and passes it as `jsonOutput`.
+    func runAgentContinuePromptCommand(commandArgs: [String], jsonOutput: Bool) throws {
         func value(_ name: String) -> String? {
             guard let index = commandArgs.firstIndex(of: name), index + 1 < commandArgs.count else { return nil }
             return commandArgs[index + 1]
@@ -255,7 +257,7 @@ extension CMUXCLI {
         )
         switch decision {
         case .send(let prompt, let interruption):
-            if commandArgs.contains("--json") {
+            if jsonOutput || commandArgs.contains("--json") {
                 let object: [String: String] = [
                     "prompt": prompt,
                     "claim_token": AgentAutoContinueLedger.claimToken(for: interruption),

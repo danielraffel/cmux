@@ -6453,7 +6453,7 @@ struct CMUXCLI {
         if command == "socket-status" { try runSocketControlStatusCommand(commandArgs: commandArgs, jsonOutput: jsonOutput, environment: processEnv); return }
         // Reads only transcripts and the continue ledger, so Subrouter can call
         // it without a reachable cmux socket.
-        if command == "agent-continue-prompt" { try runAgentContinuePromptCommand(commandArgs: commandArgs); return }
+        if command == "agent-continue-prompt" { try runAgentContinuePromptCommand(commandArgs: commandArgs, jsonOutput: jsonOutput); return }
         if command == "vm-pty-connect" { try runVMPtyConnect(commandArgs: commandArgs); return }
         if command == "docs" { try runDocsCommand(commandArgs: commandArgs, jsonOutput: jsonOutput); return }
         if command == "welcome" { printWelcome(); return }
