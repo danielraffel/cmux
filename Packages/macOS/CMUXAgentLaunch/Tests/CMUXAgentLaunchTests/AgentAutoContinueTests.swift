@@ -400,6 +400,11 @@ struct AgentAutoContinuePolicyTests {
             return
         }
         #expect(decide(.dryRun) == .alreadySent)
+        // The failed launch's retry is the same interruption and still carries it.
+        guard case .send = decide(.carry) else {
+            Issue.record("the carry retry did not send after the claim")
+            return
+        }
     }
 
     @Test("An unreadable transcript sends nothing and claims nothing")
