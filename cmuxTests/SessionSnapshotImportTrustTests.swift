@@ -970,6 +970,51 @@ struct SessionSnapshotImportTrustTests {
         #expect(Self.layoutPanelIDs(restoredLayout) == [panel.id])
     }
 
+    @Test("trusted restore keeps a valid sibling after a capped empty subtree")
+    func trustedRestoreKeepsSiblingAfterCappedEmptySubtree() throws {
+        let panel = Self.panel(terminal: SessionTerminalPanelSnapshot())
+        var empty = SessionWorkspaceLayoutSnapshot.pane(
+            SessionPaneLayoutSnapshot(panelIds: [], selectedPanelId: nil)
+        )
+        for _ in 0..<600 {
+            empty = .split(SessionSplitLayoutSnapshot(
+                orientation: .horizontal,
+                dividerPosition: 0.5,
+                first: empty,
+                second: .pane(SessionPaneLayoutSnapshot(panelIds: [], selectedPanelId: nil))
+            ))
+        }
+        var workspace = SessionWorkspaceSnapshot(
+            processTitle: "Terminal",
+            customTitle: "Capped empty subtree",
+            customColor: nil,
+            isPinned: false,
+            currentDirectory: "/tmp/project",
+            focusedPanelId: panel.id,
+            layout: .split(SessionSplitLayoutSnapshot(
+                orientation: .horizontal,
+                dividerPosition: 0.5,
+                first: empty,
+                second: .pane(SessionPaneLayoutSnapshot(panelIds: [panel.id], selectedPanelId: panel.id))
+            )),
+            panels: [panel],
+            statusEntries: [],
+            logEntries: [],
+            progress: nil,
+            gitBranch: nil
+        )
+        let original = Self.finish(workspace: &workspace, workspaceHasRemote: false)
+
+        let (restored, _) = SessionSnapshotImportTrust.snapshotForRestore(
+            original,
+            source: Self.channelImport
+        )
+        let restoredLayout = try #require(
+            restored.windows.first?.tabManager.workspaces.first?.layout
+        )
+        #expect(Self.layoutPanelIDs(restoredLayout) == [panel.id])
+    }
+
     // MARK: - Fixtures
 
     private static func makeTempDirectory() throws -> URL {
