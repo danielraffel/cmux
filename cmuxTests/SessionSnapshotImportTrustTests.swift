@@ -207,6 +207,52 @@ struct SessionSnapshotImportTrustTests {
         #expect(agent.resumeStartupInput() == " cmux restore codex \(sessionId)\n")
     }
 
+    @Test("a file import routes from Codex home config without preserving its environment")
+    func fileImportRoutesCodexFromCapturedHomeConfig() throws {
+        let sessionId = "a22293b7-bcef-4707-8439-2f538c8517a4"
+        let project = try Self.makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: project) }
+        try Data("model_provider = \"subrouter\"\n".utf8).write(
+            to: project.appendingPathComponent("config.toml")
+        )
+        let launch = AgentLaunchCommandSnapshot(
+            launcher: "codex",
+            executablePath: "/tmp/evil/codex",
+            arguments: ["codex", "resume", sessionId],
+            workingDirectory: project.path,
+            environment: [
+                "CODEX_HOME": project.path,
+                "NODE_OPTIONS": "--require /tmp/evil.js",
+            ],
+            verificationHome: project.path,
+            capturedAt: 1,
+            source: "process"
+        )
+        let terminal = SessionTerminalPanelSnapshot(
+            workingDirectory: project.path,
+            agent: SessionRestorableAgentSnapshot(
+                kind: .codex,
+                sessionId: sessionId,
+                workingDirectory: project.path,
+                launchCommand: launch
+            ),
+            wasAgentRunning: true
+        )
+
+        let (restored, _) = SessionSnapshotImportTrust.snapshotForRestore(
+            Self.snapshot(terminal: terminal),
+            source: Self.fileImport
+        )
+        let agent = try #require(
+            restored.windows.first?.tabManager.workspaces.first?.panels.first?.terminal?.agent
+        )
+        let preserved = try #require(agent.launchCommand)
+        #expect(preserved.arguments == ["codex", "-c", #"model_provider="subrouter""#])
+        #expect(preserved.environment == nil)
+        #expect(preserved.verificationHome == nil)
+        #expect(agent.resumeStartupInput() == " cmux restore codex \(sessionId)\n")
+    }
+
     @Test("a file import preserves only proven Claude Subrouter identity")
     func fileImportPreservesClaudeProviderIdentity() throws {
         let sessionId = "a22293b7-bcef-4707-8439-2f538c8517a4"
@@ -1013,6 +1059,11 @@ struct SessionSnapshotImportTrustTests {
             restored.windows.first?.tabManager.workspaces.first?.layout
         )
         #expect(Self.layoutPanelIDs(restoredLayout) == [panel.id])
+        guard case .pane(let pane) = restoredLayout else {
+            Issue.record("capped empty subtree should collapse to the valid sibling pane")
+            return
+        }
+        #expect(pane.panelIds == [panel.id])
     }
 
     // MARK: - Fixtures

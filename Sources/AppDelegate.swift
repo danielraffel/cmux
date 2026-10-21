@@ -3898,7 +3898,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
         let sanitizedStartupSnapshot = loadStartupSessionSnapshotPruningCrashDiagnostics(
             primaryOutcome: primaryOutcome
-        )
+        ).map {
+            // Startup and manual reopen use trusted snapshots, but they still
+            // need the same topology/panel bounds as file imports. Without
+            // this normalization, a deeply nested or wide own-session file
+            // reaches the recursive Bonsplit restore path unchanged.
+            SessionSnapshotImportTrust.snapshotForRestore(
+                $0,
+                source: .channel("local-startup")
+            ).snapshot
+        }
         // Before the restore guard, so a skipped restore still drops stale checkpoints.
         prepareSessionScrollbackCheckpointsForLaunch(previousLaunchWasUnclean: previousSessionLaunchWasUnclean)
         guard SessionRestorePolicy.shouldAttemptRestore(),
@@ -4265,6 +4274,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard let snapshot = SessionPersistencePolicy.pruningCmuxCrashDiagnosticWindows(from: snapshot).snapshot else {
             return false
         }
+        let snapshot = SessionSnapshotImportTrust.snapshotForRestore(
+            snapshot,
+            source: .channel("manual-reopen")
+        ).snapshot
         let snapshotWindows = Array(
             snapshot.windows.prefix(SessionPersistencePolicy.maxWindowsPerSnapshot)
         )

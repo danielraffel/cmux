@@ -232,10 +232,9 @@ enum SessionSnapshotImportTrust {
             return result
         }
         func fallbackLayout() -> SessionWorkspaceLayoutSnapshot {
-            let fallback = unusedFallbackPanelIDs()
             return .pane(SessionPaneLayoutSnapshot(
-                panelIds: fallback,
-                selectedPanelId: fallback.first
+                panelIds: [],
+                selectedPanelId: nil
             ))
         }
 
@@ -300,7 +299,13 @@ enum SessionSnapshotImportTrust {
                 }
             }
         }
-        return results.last ?? fallbackLayout()
+        let result = results.last ?? fallbackLayout()
+        guard result.isEmptyLayout else { return result }
+        let fallback = unusedFallbackPanelIDs()
+        return .pane(SessionPaneLayoutSnapshot(
+            panelIds: fallback,
+            selectedPanelId: fallback.first
+        ))
     }
 
     static func sanitizingUntrustedImport(
@@ -542,8 +547,6 @@ enum SessionSnapshotImportTrust {
             return AgentLaunchCommandSnapshot(
                 launcher: "codex",
                 arguments: ["codex", "-c", #"model_provider="subrouter""#],
-                environment: launch.environment,
-                verificationHome: launch.verificationHome,
                 source: "sanitized-provider-identity"
             )
         case .claude:
