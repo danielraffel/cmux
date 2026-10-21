@@ -145,6 +145,33 @@ import Testing
         #expect(invocation.arguments.contains("-lc") == false)
     }
 
+    @Test func legacyCaptureWithCodexHomeConfigUsesSubrouterResume() throws {
+        let config = "model_provider = \"subrouter\"\n"
+        let routing = SubrouterCodexResumeRouting()
+        #expect(
+            routing.providerEvidenceWithCapturedConfig(
+                in: ["codex", "resume", sessionID],
+                launcher: "codex",
+                environment: nil,
+                verificationHome: nil
+            ) == .absent
+        )
+        #expect(routing.providerEvidence(inConfigToml: config) == .provider("subrouter"))
+        #expect(
+            routing.providerEvidence(inConfigToml: "model_provider = \"subrouter\"\n")
+                == .provider("subrouter")
+        )
+    }
+
+    @Test func malformedOrConflictingCodexConfigDoesNotRoute() {
+        let routing = SubrouterCodexResumeRouting()
+        #expect(
+            routing.providerEvidence(inConfigToml: "model_provider = \"subrouter\"\nmodel_provider = \"openai\"\n")
+                == .ambiguous
+        )
+        #expect(routing.providerEvidence(inConfigToml: "model_provider = \"subrouter\n") == .ambiguous)
+    }
+
     @Test(arguments: [AgentRestoreRequestMode.resumeAgent, .relaunchAgent, .forkAgent])
     func ompManagedContinuationCannotFallBackToLegacyShell(mode: AgentRestoreRequestMode) {
         #expect(!AgentRestorePlanner.allowsLegacyFallback(kind: "omp", mode: mode))

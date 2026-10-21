@@ -532,11 +532,18 @@ enum SessionSnapshotImportTrust {
         switch agent.kind {
         case .codex:
             let routing = SubrouterCodexResumeRouting()
-            guard routing.providerEvidence(in: launch.arguments, launcher: launch.launcher)
+            guard routing.providerEvidenceWithCapturedConfig(
+                in: launch.arguments,
+                launcher: launch.launcher,
+                environment: launch.environment,
+                verificationHome: launch.verificationHome
+            )
                 == .provider("subrouter") else { return nil }
             return AgentLaunchCommandSnapshot(
                 launcher: "codex",
                 arguments: ["codex", "-c", #"model_provider="subrouter""#],
+                environment: launch.environment,
+                verificationHome: launch.verificationHome,
                 source: "sanitized-provider-identity"
             )
         case .claude:

@@ -9,6 +9,7 @@ extension CMUXCLIErrorOutputRegressionTests {
             agent: String,
             arguments: [String],
             launcherPrefix: [String]? = nil,
+            environment: [String: String] = [:],
             updatedAt: TimeInterval? = nil
         ) throws -> [String: Any] {
             let root = FileManager.default.temporaryDirectory
@@ -36,6 +37,7 @@ extension CMUXCLIErrorOutputRegressionTests {
                 launcher: argv0,
                 executablePath: argv0,
                 arguments: [argv0] + arguments,
+                environment: environment,
                 pid: Int(pid),
                 launcherPrefix: launcherPrefix,
                 updatedAt: updatedAt
@@ -65,6 +67,27 @@ extension CMUXCLIErrorOutputRegressionTests {
         #expect(routedCodex["expected_provider_route"] as? String == "subrouter")
         #expect(routedCodex["live_provider_route"] as? String == "unknown")
         #expect(routedCodex["provider_route_matches"] as? Bool == true)
+
+        let configRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-route-config-\(UUID().uuidString)", isDirectory: true)
+        let configHome = configRoot.appendingPathComponent("codex-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: configHome, withIntermediateDirectories: true)
+        try "model_provider = \"subrouter\"\n".write(
+            to: configHome.appendingPathComponent("config.toml"),
+            atomically: true,
+            encoding: .utf8
+        )
+        defer { try? FileManager.default.removeItem(at: configRoot) }
+        let configRoutedCodex = try routeFixture(
+            argv0: "codex",
+            agent: "codex",
+            arguments: ["019ef275-74e3-7777-9773-9dcb118ed5aa"],
+            environment: ["CODEX_HOME": configHome.path],
+            updatedAt: Date().timeIntervalSince1970
+        )
+        #expect(configRoutedCodex["expected_provider_route"] as? String == "subrouter")
+        #expect(configRoutedCodex["live_provider_route"] as? String == "unknown")
+        #expect(configRoutedCodex["provider_route_matches"] as? Bool == true)
     }
 
     @Test func testSessionsListReportsForkDiagnosticsAndAcceptsWorkspaceRefs() throws {

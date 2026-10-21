@@ -20,6 +20,7 @@ public enum SubrouterCodexProviderEvidence: Equatable, Sendable {
 /// Recognizes the bounded launch evidence emitted by `sr codex` and builds its
 /// explicit resume argv without trusting environment-provided shell text.
 public struct SubrouterCodexResumeRouting: Sendable, Equatable {
+    private static let maxConfigTomlBytes = 64 * 1024
     /// The metadata marker emitted by Subrouter for routed Codex children.
     public static let environmentKey = "SUBROUTER_CODEX_RESUME_COMMAND"
 
@@ -134,14 +135,20 @@ public struct SubrouterCodexResumeRouting: Sendable, Equatable {
         let normalizedLauncher = launcher?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        guard normalizedLauncher == nil || normalizedLauncher == "codex",
-              let marker = capturedLaunchBoundMarker(in: environment),
-              launchArgumentsContainSubrouterProvider(
-                  launchArguments,
-                  launcher: normalizedLauncher
-              ) else {
+        guard normalizedLauncher == nil || normalizedLauncher == "codex" else {
             return nil
         }
+        let capturedProvider = providerEvidenceWithCapturedConfig(
+            in: launchArguments,
+            launcher: normalizedLauncher,
+            environment: environment
+        )
+        guard capturedProvider == .provider("subrouter") else { return nil }
+
+        // New captures carry a launch-bound marker. Older captures can still
+        // prove the route through their CODEX_HOME config, so use the stable
+        // Subrouter launcher when the marker is absent.
+        let marker = capturedLaunchBoundMarker(in: environment) ?? "sr codex resume"
         return marker.split(separator: " ").map(String.init) + [sessionID]
     }
 
@@ -198,6 +205,48 @@ public struct SubrouterCodexResumeRouting: Sendable, Equatable {
             return providerEvidenceFromAssignments(in: launchArguments)
         }
         return providerEvidence(in: launchArguments)
+    }
+
+    /// Resolves provider identity from structured launch evidence and, for
+    /// older captures, the bounded Codex config selected by `CODEX_HOME`.
+    /// Explicit argv evidence always wins; a conflicting config is rejected.
+    public func providerEvidenceWithCapturedConfig(
+        in launchArguments: [String],
+        launcher: String?,
+        environment: [String: String]?,
+        verificationHome: String? = nil
+    ) -> SubrouterCodexProviderEvidence {
+        let argvEvidence = providerEvidence(in: launchArguments, launcher: launcher)
+        guard argvEvidence == .absent else { return argvEvidence }
+        let config = Self.readCapturedConfigToml(
+            environment: environment,
+            verificationHome: verificationHome
+        )
+        return providerEvidence(inConfigToml: config)
+    }
+
+    /// Parses only top-level `model_provider` assignments from a bounded TOML
+    /// document. A malformed provider assignment is ambiguous and never
+    /// upgrades a restore into a routed launch.
+    public func providerEvidence(inConfigToml configToml: String?) -> SubrouterCodexProviderEvidence {
+        guard let configToml,
+              configToml.utf8.count <= Self.maxConfigTomlBytes else {
+            return .absent
+        }
+        var providers: Set<String> = []
+        for rawLine in configToml.split(whereSeparator: \Character.isNewline) {
+            let line = stripTomlComment(String(rawLine)).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#"), !line.hasPrefix("[") else { continue }
+            if let provider = modelProviderAssignment(in: line) {
+                providers.insert(provider)
+            } else if line.hasPrefix("model_provider") {
+                return .ambiguous
+            }
+        }
+        guard providers.count == 1, let provider = providers.first else {
+            return providers.isEmpty ? .absent : .ambiguous
+        }
+        return .provider(provider)
     }
 
     /// Returns provider evidence from a canonical legacy shell command.
@@ -381,6 +430,54 @@ public struct SubrouterCodexResumeRouting: Sendable, Equatable {
             return nil
         }
         return value
+    }
+
+    private static func readCapturedConfigToml(
+        environment: [String: String]?,
+        verificationHome: String?
+    ) -> String? {
+        let rawHome = environment?["CODEX_HOME"] ?? verificationHome
+        guard let rawHome,
+              !rawHome.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let home = (rawHome as NSString).expandingTildeInPath
+        guard home.hasPrefix("/") else { return nil }
+        let path = (home as NSString).appendingPathComponent("config.toml")
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let type = attributes[.type] as? FileAttributeType,
+              type == .typeRegular,
+              let size = attributes[.size] as? NSNumber,
+              size.intValue <= maxConfigTomlBytes,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe),
+              data.count <= maxConfigTomlBytes else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func stripTomlComment(_ rawLine: String) -> String {
+        var quote: Character?
+        var escaped = false
+        for (offset, character) in rawLine.enumerated() {
+            if escaped {
+                escaped = false
+                continue
+            }
+            if character == "\\", quote == "\"" {
+                escaped = true
+                continue
+            }
+            if character == "\"" || character == "'" {
+                if quote == character { quote = nil }
+                else if quote == nil { quote = character }
+                continue
+            }
+            if character == "#", quote == nil {
+                return String(rawLine.prefix(offset))
+            }
+        }
+        return rawLine
     }
 
     /// Tokenizes the small, canonical command form persisted for legacy

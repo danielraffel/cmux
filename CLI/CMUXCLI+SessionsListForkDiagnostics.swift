@@ -280,13 +280,31 @@ extension CMUXCLI {
             }
             return record.launchCommand?.launcherPrefix ?? capturedArguments
         }()
-        let expectedRoute = Self.sessionsListTrustedLauncherRoute(
+        let routing = SubrouterCodexResumeRouting()
+        let capturedProviderEvidence = routing.providerEvidenceWithCapturedConfig(
+            in: record.launchCommand?.arguments ?? [],
+            launcher: record.launchCommand?.launcher,
+            environment: record.launchCommand?.environment,
+            verificationHome: record.launchCommand?.verificationHome
+        )
+        let trustedLauncherRoute = Self.sessionsListTrustedLauncherRoute(
             agent: agent,
             launcherPrefix: record.launchCommand?.launcherPrefix
-        ) ?? sessionsListProviderRoute(
+        )
+        let capturedArgumentRoute = sessionsListProviderRoute(
             agent: agent,
             arguments: expectedLaunchArguments
         )
+        let expectedRoute: String
+        if let trustedLauncherRoute {
+            expectedRoute = trustedLauncherRoute
+        } else if capturedArgumentRoute != "unknown" {
+            expectedRoute = capturedArgumentRoute
+        } else if capturedProviderEvidence == .provider("subrouter") {
+            expectedRoute = "subrouter"
+        } else {
+            expectedRoute = capturedArgumentRoute
+        }
         let explicitRouteMatches = Self.sessionsListProviderRoutesMatch(
             expected: expectedRoute,
             live: liveRoute
@@ -302,7 +320,10 @@ extension CMUXCLI {
                 agent: agent,
                 launcherPrefix: record.launchCommand?.launcherPrefix
             ) == "subrouter"
-        let routeMatches = explicitRouteMatches || trustedWrapperRouteMatches
+        let trustedConfigRouteMatches = expectedRoute == "subrouter"
+            && liveRoute == "unknown"
+            && capturedProviderEvidence == .provider("subrouter")
+        let routeMatches = explicitRouteMatches || trustedWrapperRouteMatches || trustedConfigRouteMatches
 
         binding["pid"] = pid
         binding["pid_start_matches"] = startMatches

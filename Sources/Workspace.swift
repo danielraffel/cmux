@@ -1343,9 +1343,11 @@ extension Workspace {
             let router = SubrouterCodexResumeRouting()
             let launchEvidence = capturedLaunch == nil
                 ? SubrouterCodexProviderEvidence.absent
-                : router.providerEvidence(
+                : router.providerEvidenceWithCapturedConfig(
                     in: capturedArguments,
-                    launcher: capturedLaunch?.launcher
+                    launcher: capturedLaunch?.launcher,
+                    environment: capturedEnvironment,
+                    verificationHome: capturedLaunch?.verificationHome
                 )
             let bindingPrefixWorkingDirectory = resumeBinding?.cwd ?? workingDirectory
             let bindingCommand = resumeBinding?.command.isEmpty == false
