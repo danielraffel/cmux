@@ -8121,6 +8121,43 @@ extension SessionPersistenceTests {
         )
     }
 
+    func testLegacySubrouterCodexRestoreUsesCapturedCodexHomeConfig() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-subrouter-config-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("codex-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try #"model_provider = "subrouter""#.write(
+            to: home.appendingPathComponent("config.toml"),
+            atomically: true,
+            encoding: .utf8
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: RestorableAgentKind.codex.rawValue,
+            command: "codex resume",
+            cwd: "/tmp/project",
+            checkpointId: "codex-session",
+            autoResume: true
+        )
+        let launch = AgentLaunchCommandSnapshot(
+            launcher: RestorableAgentKind.codex.rawValue,
+            arguments: ["codex", "resume"],
+            environment: ["CODEX_HOME": home.path]
+        )
+
+        let input = try XCTUnwrap(
+            Workspace.legacySubrouterResumeStartupInput(
+                kind: binding.kind,
+                sessionID: binding.checkpointId,
+                launchCommand: launch,
+                resumeBinding: binding,
+                workingDirectory: binding.cwd
+            )
+        )
+        XCTAssertTrue(input.contains("'sr' 'codex' 'resume' 'codex-session'"), input)
+    }
+
     func testLegacySubrouterCodexRestoreAcceptsManagedCustomExecutable() throws {
         let sessionID = "custom-codex-session"
         let binding = SurfaceResumeBindingSnapshot(
