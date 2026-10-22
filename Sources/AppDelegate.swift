@@ -4271,15 +4271,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         _ snapshot: AppSessionSnapshot,
         shouldActivate: Bool = true
     ) -> Bool {
-        guard let snapshot = SessionPersistencePolicy.pruningCmuxCrashDiagnosticWindows(from: snapshot).snapshot else {
+        guard let prunedSnapshot = SessionPersistencePolicy.pruningCmuxCrashDiagnosticWindows(from: snapshot).snapshot else {
             return false
         }
-        let snapshot = SessionSnapshotImportTrust.snapshotForRestore(
-            snapshot,
+        let normalizedSnapshot = SessionSnapshotImportTrust.snapshotForRestore(
+            prunedSnapshot,
             source: .channel("manual-reopen")
         ).snapshot
         let snapshotWindows = Array(
-            snapshot.windows.prefix(SessionPersistencePolicy.maxWindowsPerSnapshot)
+            normalizedSnapshot.windows.prefix(SessionPersistencePolicy.maxWindowsPerSnapshot)
         )
         guard !snapshotWindows.isEmpty else { return false }
 

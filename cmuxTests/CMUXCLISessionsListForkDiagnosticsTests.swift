@@ -85,9 +85,12 @@ extension CMUXCLIErrorOutputRegressionTests {
             environment: ["CODEX_HOME": configHome.path],
             updatedAt: Date().timeIntervalSince1970
         )
-        #expect(configRoutedCodex["expected_provider_route"] as? String == "subrouter")
+        // A mutable config file cannot establish the identity of an already
+        // running process. It remains useful for restore construction, but
+        // live diagnostics must fail closed without immutable launch evidence.
+        #expect(configRoutedCodex["expected_provider_route"] as? String == "unknown")
         #expect(configRoutedCodex["live_provider_route"] as? String == "unknown")
-        #expect(configRoutedCodex["provider_route_matches"] as? Bool == true)
+        #expect(configRoutedCodex["provider_route_matches"] as? Bool == false)
     }
 
     @Test func testSessionsListReportsForkDiagnosticsAndAcceptsWorkspaceRefs() throws {
